@@ -704,7 +704,12 @@ function MainApp() {
     <div className="min-h-screen flex flex-col bg-background text-foreground">
       {/* NAGŁÓWEK APLIKACJI */}
       <header className="w-full border-b-2 border-border bg-secondary-background">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4 md:px-8">
+        <div
+          className={cn(
+            'mx-auto flex items-center justify-between gap-4 px-4 py-4 md:px-8',
+            isAdminRoute && mode === 'EDITOR' ? 'max-w-7xl' : 'max-w-6xl'
+          )}
+        >
           <button
             type="button"
             onClick={() => {
@@ -761,7 +766,14 @@ function MainApp() {
       </header>
 
       {/* TREŚĆ GŁÓWNA */}
-      <div className="flex flex-1 flex-col justify-center px-4 py-6 md:px-8 md:py-10">
+      <div
+        className={cn(
+          'flex flex-1 flex-col',
+          isAdminRoute && mode === 'EDITOR'
+            ? 'justify-start px-4 py-4 md:px-8 md:py-6'
+            : 'justify-center px-4 py-6 md:px-8 md:py-10'
+        )}
+      >
         {isAdminRoute && mode === 'MENU' && (
           <AdminMenu
             quizzes={quizzes}
