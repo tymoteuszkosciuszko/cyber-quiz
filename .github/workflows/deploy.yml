@@ -8,6 +8,24 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Cel wdrożenia'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - oci
+          - gcp
+      gcp_if_stopped:
+        description: 'GCP: zachowanie gdy VM jest zatrzymana'
+        required: false
+        default: 'start-and-stop'
+        type: choice
+        options:
+          - start-and-stop
+          - skip
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -63,11 +81,12 @@ jobs:
         working-directory: client
         run: npm ci
 
-      - name: Check JS syntax
+      - name: Check JS & shell scripts syntax
         run: |
           node --check server/index.js
           node --check scripts/smoke-test.mjs
           node --check scripts/load-test.mjs
+          bash -n scripts/deploy.sh deploy/gcp/*.sh
 
       - name: Build frontend bundle (Vite)
         working-directory: client
@@ -94,8 +113,8 @@ jobs:
     name: Deploy to 2115.2115.xyz
     needs: test-and-build
     if: >-
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target != 'gcp'))
     runs-on: ubuntu-latest
 
     steps:
@@ -166,3 +185,158 @@ jobs:
       - name: Cleanup SSH key
         if: always()
         run: rm -rf ~/.ssh/deploy_key
+
+  deploy-gcp:
+    name: Deploy to GCP
+    needs: test-and-build
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target != 'oci'))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate GCP deployment secrets
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+        run: |
+          missing=0
+          for var in GCP_SA_KEY GCP_PROJECT_ID; do
+            if [ -z "${!var}" ]; then
+              echo "::error::Brak wymaganego sekretu/zmiennej GitHub Actions: $var"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Check VM state and start if stopped
+        id: vm
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || secrets.GCP_ZONE || 'europe-central2-a' }}
+          GCP_VM_NAME: ${{ vars.GCP_VM_NAME || secrets.GCP_VM_NAME || 'cyber-quiz-vm' }}
+          IF_STOPPED: ${{ github.event.inputs.gcp_if_stopped || vars.GCP_DEPLOY_WHEN_STOPPED || 'start-and-stop' }}
+        run: |
+          set -Eeuo pipefail
+
+          get_status() {
+            gcloud compute instances describe "$GCP_VM_NAME" \
+              --project="$GCP_PROJECT_ID" \
+              --zone="$GCP_ZONE" \
+              --format='get(status)'
+          }
+
+          STATUS="$(get_status)"
+          echo "Aktualny stan VM ${GCP_VM_NAME} (${GCP_ZONE}): ${STATUS}"
+
+          if [ "$STATUS" = "RUNNING" ]; then
+            echo "started_by_ci=false" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$IF_STOPPED" = "skip" ]; then
+            echo "::notice::VM ${GCP_VM_NAME} jest zatrzymana (${STATUS}) i tryb to 'skip' — pomijam deploy na GCP."
+            echo "started_by_ci=false" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$STATUS" = "STOPPING" ]; then
+            echo "VM jest w trakcie zatrzymywania — czekam na stan TERMINATED..."
+            for _ in $(seq 1 24); do
+              STATUS="$(get_status)"
+              [ "$STATUS" = "TERMINATED" ] && break
+              sleep 5
+            done
+          fi
+
+          echo "Uruchamiam VM ${GCP_VM_NAME} na czas wdrożenia (zostanie automatycznie zatrzymana po zakończeniu)..."
+          gcloud compute instances start "$GCP_VM_NAME" \
+            --project="$GCP_PROJECT_ID" \
+            --zone="$GCP_ZONE" \
+            --quiet
+
+          # Zapisz flagę od razu po starcie, aby krok 'Stop VM' zawsze ją wyłączył nawet przy błędzie SSH/deploy
+          echo "started_by_ci=true" >> "$GITHUB_OUTPUT"
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+          echo "Oczekiwanie na gotowość SSH przez IAP..."
+          for attempt in $(seq 1 24); do
+            if gcloud compute ssh "$GCP_VM_NAME" \
+              --project="$GCP_PROJECT_ID" \
+              --zone="$GCP_ZONE" \
+              --tunnel-through-iap \
+              --quiet \
+              --ssh-flag="-o BatchMode=yes" \
+              --ssh-flag="-o ConnectTimeout=10" \
+              --ssh-flag="-o StrictHostKeyChecking=accept-new" \
+              --command="true" >/dev/null 2>&1; then
+              echo "SSH przez IAP gotowe (próba ${attempt})."
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::Timeout oczekiwania na SSH przez IAP dla VM ${GCP_VM_NAME}."
+          exit 1
+
+      - name: Deploy on GCP VM via IAP SSH
+        if: steps.vm.outputs.should_deploy == 'true'
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || secrets.GCP_ZONE || 'europe-central2-a' }}
+          GCP_VM_NAME: ${{ vars.GCP_VM_NAME || secrets.GCP_VM_NAME || 'cyber-quiz-vm' }}
+          GCP_DEPLOY_DIR: ${{ vars.GCP_DEPLOY_DIR || '/opt/cyber-quiz' }}
+        run: |
+          set -Eeuo pipefail
+          REMOTE_B64="$(base64 -w0 <<'EOF'
+          set -Eeuo pipefail
+          TARGET_DIR="$1"
+
+          REPO_OWNER="$(stat -c '%U' "$TARGET_DIR")"
+          if [ "$REPO_OWNER" != "root" ] && id "$REPO_OWNER" >/dev/null 2>&1; then
+            sudo -u "$REPO_OWNER" -H git -C "$TARGET_DIR" fetch --prune origin main
+            sudo -u "$REPO_OWNER" -H git -C "$TARGET_DIR" checkout main
+            sudo -u "$REPO_OWNER" -H git -C "$TARGET_DIR" reset --hard origin/main
+          else
+            git -C "$TARGET_DIR" fetch --prune origin main
+            git -C "$TARGET_DIR" checkout main
+            git -C "$TARGET_DIR" reset --hard origin/main
+          fi
+
+          DEPLOY_DIR="$TARGET_DIR" bash "$TARGET_DIR/deploy/gcp/deploy.sh"
+          EOF
+          )"
+
+          gcloud compute ssh "$GCP_VM_NAME" \
+            --project="$GCP_PROJECT_ID" \
+            --zone="$GCP_ZONE" \
+            --tunnel-through-iap \
+            --quiet \
+            --ssh-flag="-o BatchMode=yes" \
+            --ssh-flag="-o ConnectTimeout=15" \
+            --ssh-flag="-o StrictHostKeyChecking=accept-new" \
+            --command="printf '%s' '${REMOTE_B64}' | base64 -d | sudo bash -s -- '${GCP_DEPLOY_DIR}'"
+
+      - name: Stop GCP VM if started by CI
+        if: always() && steps.vm.outputs.started_by_ci == 'true'
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || secrets.GCP_ZONE || 'europe-central2-a' }}
+          GCP_VM_NAME: ${{ vars.GCP_VM_NAME || secrets.GCP_VM_NAME || 'cyber-quiz-vm' }}
+        run: |
+          echo "Zatrzymuję VM ${GCP_VM_NAME} uruchomioną na potrzeby CI/CD..."
+          gcloud compute instances stop "$GCP_VM_NAME" \
+            --project="$GCP_PROJECT_ID" \
+            --zone="$GCP_ZONE" \
+            --quiet
+          echo "VM ${GCP_VM_NAME} zatrzymana (koszt CPU i ephemeral IP = \$0)."
