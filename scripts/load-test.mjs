@@ -68,6 +68,8 @@ Parametry:
   --words <a,b,c>               Własna lista haseł dla pytań typu chmura słów (oddzielone przecinkiem)
   --transport <ws|polling|auto> Transport Socket.IO (domyślnie: ws)
   --auto-host                   Tryb autonomiczny: sam tworzy pokój, startuje grę i zamyka po zakończeniu
+  --username <login>            Login admina/superadmina dla --auto-host (lub zmienna ADMIN_USERNAME)
+  --password <hasło>            Hasło admina/superadmina dla --auto-host (lub zmienna ADMIN_PASSWORD)
   --quiz <quizId>               ID zestawu dla --auto-host (np. default-cyber-quiz, demo-mixed-session, demo-opinion-session)
   -h, --help                    Wyświetla tę pomoc
 
@@ -93,6 +95,8 @@ function parseArgs(argv) {
     words: DEFAULT_WORD_CLOUD_POOL,
     transport: 'ws',
     autoHost: false,
+    username: process.env.ADMIN_USERNAME || '',
+    password: process.env.ADMIN_PASSWORD || '',
     quizId: undefined,
     help: false,
   };
@@ -146,6 +150,12 @@ function parseArgs(argv) {
       i++;
     } else if (arg === '--quiz') {
       opts.quizId = String(next ?? '').trim();
+      i++;
+    } else if (arg === '--username') {
+      opts.username = String(next ?? '').trim();
+      i++;
+    } else if (arg === '--password') {
+      opts.password = String(next ?? '');
       i++;
     } else if (!arg.startsWith('-') && opts.players === null && /^\d+$/.test(arg)) {
       opts.players = Number(arg);
@@ -486,13 +496,45 @@ async function main() {
     cleanupAndExit(0, 'PRZERWANO_SIGINT');
   });
 
-  // Opcjonalny tryb --auto-host tworzy pokój i zarządza przebiegiem gry
+  // Opcjonalny tryb --auto-host loguje się jako admin, tworzy pokój i zarządza przebiegiem gry
   if (opts.autoHost) {
+    if (!opts.username || !opts.password) {
+      throw new Error(
+        'Tryb --auto-host wymaga uwierzytelnienia: podaj --username oraz --password (lub ADMIN_USERNAME / ADMIN_PASSWORD).'
+      );
+    }
+    console.log(`[HOST] Logowanie jako "${opts.username}" w ${opts.url}...`);
+    const loginRes = await fetch(`${opts.url.replace(/\/$/, '')}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: opts.username,
+        password: opts.password,
+      }),
+    });
+    if (!loginRes.ok) {
+      const errBody = await loginRes.json().catch(() => ({}));
+      throw new Error(
+        `Logowanie hosta nie powiodło się (${loginRes.status}): ${errBody.error || loginRes.statusText}`
+      );
+    }
+    const setCookies =
+      typeof loginRes.headers.getSetCookie === 'function'
+        ? loginRes.headers.getSetCookie()
+        : [loginRes.headers.get('set-cookie')].filter(Boolean);
+    const sessionCookie = setCookies
+      .map((c) => c.split(';')[0])
+      .find((c) => c.includes('cq_sid='));
+    if (!sessionCookie) {
+      throw new Error('Brak ciasteczka sesyjnego w odpowiedzi /api/auth/login.');
+    }
+
     console.log(`[HOST] Łączenie z ${opts.url} i tworzenie pokoju...`);
     hostSocket = io(opts.url, {
       transports,
       reconnection: false,
       timeout: 10000,
+      extraHeaders: { Cookie: sessionCookie },
     });
 
     await new Promise((resolve, reject) => {

@@ -30,20 +30,26 @@ Platforma do interaktywnych quizów wieloosobowych czasu rzeczywistego z interfe
 
 ## Uruchomienie lokalne (tryb deweloperski)
 
-### 1. Uruchom Redis
+### 1. Uruchom Redis i PostgreSQL
 ```bash
 docker compose up -d
 ```
 
-### 2. Uruchom backend
+### 2. Utwórz jedyne konto superadmina (jednorazowo)
 ```bash
 cd server
 npm install    # tylko za pierwszym razem
+npm run bootstrap-superadmin
+```
+Skrypt interaktywnie zapyta o login i silne hasło (min. 12 znaków). W razie potrzeby hasło superadmina można awaryjnie zresetować z poziomu serwera poleceniem `npm run reset-superadmin`.
+
+### 3. Uruchom backend
+```bash
 npm run dev    # lub: npm start
 ```
-Serwer nasłuchuje domyślnie na porcie `3001` (`0.0.0.0`) i łączy się z Redisem pod `127.0.0.1:6379`.
+Serwer nasłuchuje domyślnie na porcie `3001` (`0.0.0.0`), łączy się z Redisem pod `127.0.0.1:6379` oraz PostgreSQL pod `127.0.0.1:5432` (automatycznie wykonując migracje i seed 3 wbudowanych szablonów quizów).
 
-### 3. Uruchom frontend
+### 4. Uruchom frontend
 W nowym terminalu:
 ```bash
 cd client
@@ -52,11 +58,30 @@ npm run dev
 ```
 Vite uruchamia serwer deweloperski na porcie `5173` z flagą `--host` (dostępny w sieci lokalnej).
 
-### 4. Otwórz w przeglądarce
+### 5. Otwórz w przeglądarce
 
-- **Panel Prowadzącego / Edytor quizów:** `http://localhost:5173/game-admin`
-- **Ekran gry (rzutnik):** otwiera się automatycznie w nowym oknie po utworzeniu pokoju albo pod `http://localhost:5173/game-screen?pin=XXXXXX`
-- **Smartfon gracza:** zeskanuj kod QR z ekranu gry lub otwórz `http://<IP_SIECI>:5173/?pin=XXXXXX`
+- **Panel Prowadzącego / Edytor quizów (wymaga logowania):** `http://localhost:5173/game-admin`
+- **Ekran gry (rzutnik, publiczny):** otwiera się automatycznie w nowym oknie po utworzeniu pokoju albo pod `http://localhost:5173/game-screen?pin=XXXXXX`
+- **Smartfon gracza (publiczny):** zeskanuj kod QR z ekranu gry lub otwórz `http://<IP_SIECI>:5173/?pin=XXXXXX`
+
+## Bezpieczeństwo i konta administratorów (OWASP ASVS)
+
+Panel `/game-admin`, wszystkie endpointy `/api/*` oraz zdarzenia prowadzącego Socket.IO (`host_*`) są chronione wbudowanym systemem uwierzytelniania i kontroli dostępu:
+
+- **Role:**
+  - `superadmin` (twardy limit **jednego konta** wymuszony unikalnym indeksem częściowym w PostgreSQL): pełny dostęp + zakładka **Admini i Audyt** (tworzenie kont `admin` z jednorazowym hasłem tymczasowym, dezaktywacja z natychmiastowym odcięciem sesji, reset haseł, usuwanie, dziennik `audit_logs`).
+  - `admin`: zarządzanie wyłącznie własnymi quizami (izolacja per użytkownik + możliwość uruchamiania i klonowania wbudowanych szablonów) oraz prowadzenie własnych sesji gry.
+- **Mechanizmy bezpieczeństwa:** hashowanie haseł **Argon2id**, polityka haseł min. 12 znaków (NFKC + lista słabych haseł), sesje serwerowe w Redisie (256-bitowe `sid` w ciasteczku `HttpOnly` / `Secure` / `SameSite=Lax` / prefiks `__Host-`), ochrona **CSRF** (`X-CSRF-Token` + weryfikacja `Origin`), progresywny lockout i rate-limiting IP, nagłówki `helmet` (CSP, HSTS, `nosniff`) oraz walidacja właściciela pokoju gry w Socket.IO.
+- **Bootstrap na produkcji (Docker):**
+  ```bash
+  docker exec -it cyber-quiz node scripts/bootstrap-superadmin.mjs
+  ```
+- **Zmiana loginu i/lub awaryjny reset hasła superadmina (SSH):**
+  ```bash
+  docker exec -it cyber-quiz node scripts/reset-superadmin.mjs
+  # lub zmiana samego loginu:
+  docker exec -it cyber-quiz node scripts/reset-superadmin.mjs --username nowy_login --keep-password
+  ```
 
 ## Wdrożenie produkcyjne (Docker + SWAG)
 

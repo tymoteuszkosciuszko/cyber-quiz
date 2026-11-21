@@ -3,32 +3,102 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import Redis from 'ioredis';
 import cors from 'cors';
-import { v4 as uuidv4 } from 'uuid';
+import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { createPool, initDatabase } from './db/pool.js';
+import { DEFAULT_QUIZ_ID } from './db/seedTemplates.js';
+import {
+  cloneQuiz,
+  createQuiz,
+  deleteQuiz,
+  getQuizByIdForUser,
+  getQuizByIdInternal,
+  listQuizzesForUser,
+  updateQuiz,
+} from './db/quizRepository.js';
+import { createAuthRouter } from './auth/authRoutes.js';
+import { createAdminRouter } from './auth/adminRoutes.js';
+import {
+  createRequireAuth,
+  createRequireCsrf,
+  createSocketAuthMiddleware,
+  isOriginAllowed,
+} from './auth/middleware.js';
+import { getSessionByHash } from './auth/sessions.js';
+import { extractReqMeta, logAudit } from './auth/audit.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const CORS_ORIGIN =
-  process.env.CORS_ORIGIN && process.env.CORS_ORIGIN !== '*'
-    ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
+const IS_PROD = process.env.NODE_ENV === 'production';
+const RAW_CORS_ORIGIN = (process.env.CORS_ORIGIN || '').trim();
+
+if (IS_PROD && (!RAW_CORS_ORIGIN || RAW_CORS_ORIGIN === '*')) {
+  console.error(
+    '[SECURITY_CONFIG_ERROR] W produkcji CORS_ORIGIN musi być jawnym adresem (np. https://quiz.twojadomena.pl), nie "*".'
+  );
+  process.exit(1);
+}
+
+const ALLOWED_ORIGINS =
+  RAW_CORS_ORIGIN && RAW_CORS_ORIGIN !== '*'
+    ? RAW_CORS_ORIGIN.split(',')
+        .map((o) => o.trim())
+        .filter(Boolean)
     : '*';
+
+const corsOriginValidator = (origin, callback) => {
+  if (!origin) return callback(null, true);
+  if (isOriginAllowed(origin, ALLOWED_ORIGINS)) {
+    return callback(null, true);
+  }
+  return callback(null, false);
+};
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = Number(process.env.REDIS_PORT) || 6379;
 
 const app = express();
+app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(cors({ origin: CORS_ORIGIN }));
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'https:', 'http:'],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],
+        fontSrc: ["'self'", 'data:'],
+        frameAncestors: ["'none'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    referrerPolicy: { policy: 'no-referrer' },
+    hsts: IS_PROD ? { maxAge: 31536000, includeSubDomains: true } : false,
+  })
+);
+app.use(
+  cors({
+    origin: corsOriginValidator,
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: '15mb' }));
 
 const httpServer = createServer(app);
 
 // Optymalizacja pod 200+ połączeń: wyłączenie kompresji perMessageDeflate oszczędza CPU i RAM
 const io = new Server(httpServer, {
-  cors: { origin: CORS_ORIGIN },
+  cors: {
+    origin: corsOriginValidator,
+    credentials: true,
+  },
   perMessageDeflate: false,
   maxHttpBufferSize: 15e6,
   pingInterval: 25000,
@@ -46,6 +116,14 @@ const redis = new Redis({
 redis.on('error', (err) => {
   console.error('[REDIS_ERROR]', err.message);
 });
+
+const pool = createPool();
+pool.on('error', (err) => {
+  console.error('[POSTGRES_ERROR]', err.message);
+});
+
+// Middleware uwierzytelniania dla Socket.IO (publiczne połączenia graczy/ekranu są dozwolone bez sesji)
+io.use(createSocketAuthMiddleware(redis, ALLOWED_ORIGINS));
 
 // Stałe czasowe rozgrywki
 const START_COUNTDOWN_SECONDS = 3;
@@ -85,156 +163,33 @@ function quizHasScoredQuestions(quiz) {
   return quiz.questions.some((q) => resolveQuestionScored(q, mode));
 }
 
-// ==========================================
-// Baza quizów w pamięci (z domyślnymi zestawami startowymi)
-// ==========================================
-const quizzes = new Map();
-const defaultQuizId = 'default-cyber-quiz';
-quizzes.set(defaultQuizId, {
-  id: defaultQuizId,
-  title: 'PROTOKÓŁ: BEZPIECZEŃSTWO SIECIOWE_v1.0',
-  mode: 'quiz',
-  questions: [
-    {
-      type: 'abcd',
-      content: 'Który port domyślnie odpowiada za szyfrowany ruch HTTPS?',
-      timeLimit: 15,
-      answers: ['Port 80', 'Port 443', 'Port 22', 'Port 8080'],
-      correctIndex: 1,
-      scored: true,
-    },
-    {
-      type: 'abcd',
-      content:
-        'Jaka jest złożoność czasowa operacji ZADD w strukturze Sorted Set (Redis)?',
-      timeLimit: 20,
-      answers: ['O(1)', 'O(log N)', 'O(N)', 'O(N²)'],
-      correctIndex: 1,
-      scored: true,
-    },
-    {
-      type: 'abcd',
-      content:
-        'Co oznacza skrót XSS w kontekście podatności aplikacji webowych?',
-      timeLimit: 15,
-      answers: [
-        'Extreme Server Security',
-        'Cross-Site Scripting',
-        'XML System Socket',
-        'X-Ray Socket Layer',
-      ],
-      correctIndex: 1,
-      scored: true,
-    },
-    {
-      type: 'abcd',
-      content:
-        'Który atak polega na przechwytywaniu komunikacji między dwiema stronami bez ich wiedzy?',
-      timeLimit: 20,
-      answers: [
-        'Brute Force',
-        'Phishing',
-        'Man-in-the-Middle',
-        'SQL Injection',
-      ],
-      correctIndex: 2,
-      scored: true,
-    },
-    {
-      type: 'abcd',
-      content: 'Jakie rozszerzenie pliku najczęściej kojarzy się z ransomware?',
-      timeLimit: 15,
-      answers: ['.locked / .crypt', '.pdf', '.docx', '.html'],
-      correctIndex: 0,
-      scored: true,
-    },
-  ],
-});
-
-quizzes.set('demo-mixed-session', {
-  id: 'demo-mixed-session',
-  title: 'DEMO: WSZYSTKIE FORMY PYTAŃ (TRYB MIESZANY)',
-  mode: 'mixed',
-  questions: [
-    {
-      type: 'abcd',
-      content: 'Który protokół działa w warstwie transportowej modelu OSI?',
-      timeLimit: 15,
-      answers: ['HTTP', 'TCP', 'ARP', 'DNS'],
-      correctIndex: 1,
-      scored: true,
-    },
-    {
-      type: 'true_false',
-      content: 'Prawda czy fałsz: Protokół UDP gwarantuje dostarczenie wszystkich pakietów w kolejności.',
-      timeLimit: 15,
-      answers: ['Prawda', 'Fałsz'],
-      correctIndex: 1,
-      scored: true,
-    },
-    {
-      type: 'slider',
-      content: 'W którym roku opublikowano pierwszą wersję jądra Linux?',
-      timeLimit: 20,
-      sliderMin: 1980,
-      sliderMax: 2005,
-      sliderStep: 1,
-      sliderUnit: 'r.',
-      scored: true,
-      sliderCorrect: 1991,
-      sliderTolerance: 3,
-    },
-    {
-      type: 'poll',
-      content: 'Z jakiego systemu operacyjnego korzystasz najczęściej na co dzień?',
-      timeLimit: 20,
-      answers: ['Linux', 'macOS', 'Windows', 'Inny / kilka naraz'],
-      scored: false,
-    },
-    {
-      type: 'word_cloud',
-      content: 'Jednym słowem: z czym najbardziej kojarzy Ci się cyberbezpieczeństwo?',
-      timeLimit: 25,
-      maxLength: 28,
-      scored: false,
-    },
-  ],
-});
-
-quizzes.set('demo-opinion-session', {
-  id: 'demo-opinion-session',
-  title: 'DEMO: SESJA OPINII I ANKIET',
-  mode: 'opinion',
-  questions: [
-    {
-      type: 'poll',
-      content: 'Jaki format warsztatów preferujesz najbardziej?',
-      timeLimit: 20,
-      answers: ['Live coding', 'Capture The Flag (CTF)', 'Prezentacja + Q&A', 'Case study'],
-      scored: false,
-    },
-    {
-      type: 'slider',
-      content: 'Jak oceniasz swój obecny poziom wiedzy o bezpieczeństwie aplikacji webowych?',
-      timeLimit: 20,
-      sliderMin: 1,
-      sliderMax: 10,
-      sliderStep: 1,
-      sliderUnit: '/10',
-      scored: false,
-    },
-    {
-      type: 'word_cloud',
-      content: 'Jakie narzędzie lub technologię chcesz poznać w tym roku?',
-      timeLimit: 25,
-      maxLength: 32,
-      scored: false,
-    },
-  ],
-});
-
-// Aktywne timery pokojów w pamięci procesu Node.js
+// Aktywne timery i cache snapshotów quizów dla bieżących pokojów (O(1) dla 200+ graczy)
 const roomTimers = new Map();
+const roomQuizCache = new Map();
+
+async function getActiveRoomQuiz(pin, quizId) {
+  if (pin && roomQuizCache.has(pin)) {
+    return roomQuizCache.get(pin);
+  }
+  if (pin) {
+    const cachedJson = await redis.get(`room:${pin}:quiz`);
+    if (cachedJson) {
+      try {
+        const parsed = JSON.parse(cachedJson);
+        roomQuizCache.set(pin, parsed);
+        return parsed;
+      } catch {
+        // fallback do PostgreSQL
+      }
+    }
+  }
+  if (!quizId) return null;
+  const fromDb = await getQuizByIdInternal(pool, quizId);
+  if (fromDb && pin) {
+    roomQuizCache.set(pin, fromDb);
+  }
+  return fromDb;
+}
 
 // ==========================================
 // WALIDACJA I NORMALIZACJA PYTAŃ (TRYBY, FORMY, ZDJĘCIA)
@@ -402,83 +357,190 @@ function normalizeAndValidateQuestions(rawQuestions, rawMode = 'quiz') {
 }
 
 // ==========================================
-// REST API — EDYTOR QUIZÓW
+// REST API — UWIERZYTELNIANIE I ADMINISTRACJA
 // ==========================================
 
-app.get('/api/quizzes', (_req, res) => {
-  const list = Array.from(quizzes.values()).map((q) => ({
-    id: q.id,
-    title: q.title,
-    mode: q.mode || 'quiz',
-    questionsCount: q.questions.length,
-    hasImages: q.questions.some(
-      (item) =>
-        Boolean(item.image) ||
-        (Array.isArray(item.answerImages) && item.answerImages.some(Boolean))
-    ),
-  }));
-  res.json(list);
+const requireAuth = createRequireAuth(redis);
+const requireCsrf = createRequireCsrf(ALLOWED_ORIGINS);
+
+app.use(
+  '/api/auth',
+  createAuthRouter({ pool, redis, allowedOrigins: ALLOWED_ORIGINS })
+);
+app.use(
+  '/api/admin',
+  createAdminRouter({ pool, redis, allowedOrigins: ALLOWED_ORIGINS })
+);
+
+// ==========================================
+// REST API — EDYTOR QUIZÓW (PostgreSQL + izolacja per admin)
+// ==========================================
+
+app.get('/api/quizzes', requireAuth, async (req, res) => {
+  try {
+    const list = await listQuizzesForUser(pool, req.user);
+    res.json(list);
+  } catch (err) {
+    console.error('[QUIZ_LIST_ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
 });
 
-app.get('/api/quizzes/:id', (req, res) => {
-  const quiz = quizzes.get(req.params.id);
-  if (!quiz) return res.status(404).json({ error: 'QUIZ_NOT_FOUND' });
-  res.json({ ...quiz, mode: quiz.mode || 'quiz' });
+app.get('/api/quizzes/:id', requireAuth, async (req, res) => {
+  try {
+    const quiz = await getQuizByIdForUser(pool, req.params.id, req.user);
+    if (!quiz) return res.status(404).json({ error: 'QUIZ_NOT_FOUND' });
+    res.json(quiz);
+  } catch (err) {
+    console.error('[QUIZ_GET_ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
 });
 
-app.post('/api/quizzes', (req, res) => {
-  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
-  if (!title) {
-    return res.status(400).json({ error: 'INVALID_PAYLOAD' });
+app.post('/api/quizzes', requireAuth, requireCsrf, async (req, res) => {
+  try {
+    const title =
+      typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 160) : '';
+    if (!title) {
+      return res.status(400).json({ error: 'INVALID_PAYLOAD' });
+    }
+    const requestedMode = req.body?.mode || 'quiz';
+    if (!VALID_MODES.has(requestedMode)) {
+      return res.status(400).json({ error: 'INVALID_MODE' });
+    }
+    const result = normalizeAndValidateQuestions(
+      req.body?.questions,
+      requestedMode
+    );
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    const newQuiz = await createQuiz(pool, req.user, {
+      title,
+      mode: result.mode,
+      questions: result.questions,
+    });
+
+    const meta = extractReqMeta(req);
+    await logAudit(pool, {
+      actorId: req.user.id,
+      actorName: req.user.username,
+      eventType: 'QUIZ_CREATED',
+      targetId: newQuiz.id,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      status: 'SUCCESS',
+      metadata: { title: newQuiz.title, mode: newQuiz.mode },
+    });
+
+    res.status(201).json(newQuiz);
+  } catch (err) {
+    console.error('[QUIZ_CREATE_ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR' });
   }
-  const requestedMode = req.body?.mode || 'quiz';
-  if (!VALID_MODES.has(requestedMode)) {
-    return res.status(400).json({ error: 'INVALID_MODE' });
-  }
-  const result = normalizeAndValidateQuestions(req.body?.questions, requestedMode);
-  if (result.error) {
-    return res.status(400).json({ error: result.error });
-  }
-  const id = uuidv4();
-  const newQuiz = { id, title, mode: result.mode, questions: result.questions };
-  quizzes.set(id, newQuiz);
-  res.status(201).json(newQuiz);
 });
 
-// Aktualizacja istniejącego quizu
-app.put('/api/quizzes/:id', (req, res) => {
-  if (!quizzes.has(req.params.id)) {
-    return res.status(404).json({ error: 'QUIZ_NOT_FOUND' });
+// Klonowanie szablonu lub własnego quizu do edytowalnej kopii bieżącego admina
+app.post('/api/quizzes/:id/clone', requireAuth, requireCsrf, async (req, res) => {
+  try {
+    const cloned = await cloneQuiz(pool, req.params.id, req.user);
+    if (!cloned) {
+      return res.status(404).json({ error: 'QUIZ_NOT_FOUND' });
+    }
+
+    const meta = extractReqMeta(req);
+    await logAudit(pool, {
+      actorId: req.user.id,
+      actorName: req.user.username,
+      eventType: 'QUIZ_CLONED',
+      targetId: cloned.id,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      status: 'SUCCESS',
+      metadata: { sourceId: req.params.id, title: cloned.title },
+    });
+
+    res.status(201).json(cloned);
+  } catch (err) {
+    console.error('[QUIZ_CLONE_ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR' });
   }
-  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
-  if (!title) {
-    return res.status(400).json({ error: 'INVALID_PAYLOAD' });
-  }
-  const requestedMode = req.body?.mode || 'quiz';
-  if (!VALID_MODES.has(requestedMode)) {
-    return res.status(400).json({ error: 'INVALID_MODE' });
-  }
-  const result = normalizeAndValidateQuestions(req.body?.questions, requestedMode);
-  if (result.error) {
-    return res.status(400).json({ error: result.error });
-  }
-  const updated = {
-    id: req.params.id,
-    title,
-    mode: result.mode,
-    questions: result.questions,
-  };
-  quizzes.set(req.params.id, updated);
-  res.json(updated);
 });
 
-// Usunięcie quizu
-app.delete('/api/quizzes/:id', (req, res) => {
-  if (!quizzes.has(req.params.id)) {
-    return res.status(404).json({ error: 'QUIZ_NOT_FOUND' });
+// Aktualizacja istniejącego quizu (tylko właściciel; szablony tylko superadmin)
+app.put('/api/quizzes/:id', requireAuth, requireCsrf, async (req, res) => {
+  try {
+    const title =
+      typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 160) : '';
+    if (!title) {
+      return res.status(400).json({ error: 'INVALID_PAYLOAD' });
+    }
+    const requestedMode = req.body?.mode || 'quiz';
+    if (!VALID_MODES.has(requestedMode)) {
+      return res.status(400).json({ error: 'INVALID_MODE' });
+    }
+    const result = normalizeAndValidateQuestions(
+      req.body?.questions,
+      requestedMode
+    );
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    const updated = await updateQuiz(pool, req.params.id, req.user, {
+      title,
+      mode: result.mode,
+      questions: result.questions,
+    });
+    if (updated.error) {
+      return res.status(updated.status || 400).json({ error: updated.error });
+    }
+
+    const meta = extractReqMeta(req);
+    await logAudit(pool, {
+      actorId: req.user.id,
+      actorName: req.user.username,
+      eventType: 'QUIZ_UPDATED',
+      targetId: updated.quiz.id,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      status: 'SUCCESS',
+      metadata: { title: updated.quiz.title, mode: updated.quiz.mode },
+    });
+
+    res.json(updated.quiz);
+  } catch (err) {
+    console.error('[QUIZ_UPDATE_ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR' });
   }
-  quizzes.delete(req.params.id);
-  res.json({ message: 'QUIZ_DELETED' });
+});
+
+// Usunięcie quizu (tylko właściciel lub superadmin; szablony chronione)
+app.delete('/api/quizzes/:id', requireAuth, requireCsrf, async (req, res) => {
+  try {
+    const deleted = await deleteQuiz(pool, req.params.id, req.user);
+    if (deleted.error) {
+      return res.status(deleted.status || 400).json({ error: deleted.error });
+    }
+
+    const meta = extractReqMeta(req);
+    await logAudit(pool, {
+      actorId: req.user.id,
+      actorName: req.user.username,
+      eventType: 'QUIZ_DELETED',
+      targetId: req.params.id,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      status: 'SUCCESS',
+      metadata: { title: deleted.title },
+    });
+
+    res.json({ message: 'QUIZ_DELETED' });
+  } catch (err) {
+    console.error('[QUIZ_DELETE_ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
 });
 
 // ==========================================
@@ -487,10 +549,10 @@ app.delete('/api/quizzes/:id', (req, res) => {
 
 app.get('/health', async (_req, res) => {
   try {
-    await redis.ping();
-    res.status(200).json({ status: 'ok', redis: 'ready' });
+    await Promise.all([redis.ping(), pool.query('SELECT 1')]);
+    res.status(200).json({ status: 'ok', redis: 'ready', postgres: 'ready' });
   } catch (_err) {
-    res.status(503).json({ status: 'degraded', redis: 'unavailable' });
+    res.status(503).json({ status: 'degraded' });
   }
 });
 
@@ -734,7 +796,7 @@ async function buildRoomSnapshot(pin) {
     return { error: 'ROOM_NOT_FOUND' };
   }
 
-  const quiz = quizzes.get(state.quiz_id);
+  const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
   const sessionMode = quiz?.mode || state.quiz_mode || 'quiz';
   const hasScoredQuestions = quizHasScoredQuestions(quiz);
   const fullResults = await getFullLeaderboard(pin);
@@ -864,7 +926,7 @@ async function startQuestionPreview(pin, qIndex) {
   const state = await redis.hgetall(`room:${pin}:state`);
   if (!state || !state.quiz_id || state.status === 'ABORTED') return;
 
-  const quiz = quizzes.get(state.quiz_id);
+  const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
   if (!quiz || qIndex >= quiz.questions.length) {
     return finishQuiz(pin);
   }
@@ -938,7 +1000,7 @@ async function revealAnswersAndStartQuestion(pin, qIndex) {
     return;
   }
 
-  const quiz = quizzes.get(state.quiz_id);
+  const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
   if (!quiz || !quiz.questions[qIndex]) {
     return finishQuiz(pin);
   }
@@ -1037,7 +1099,7 @@ async function endQuestion(pin, qIndex) {
   const state = await redis.hgetall(`room:${pin}:state`);
   if (!state || state.status !== 'QUESTION') return;
 
-  const quiz = quizzes.get(state.quiz_id);
+  const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
   if (!quiz || !quiz.questions[qIndex]) return;
 
   const sessionMode = quiz.mode || 'quiz';
@@ -1240,7 +1302,7 @@ async function finishQuiz(pin) {
   const state = await redis.hgetall(`room:${pin}:state`);
   if (!state || state.status === 'ABORTED') return;
 
-  const quiz = quizzes.get(state.quiz_id);
+  const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
   const sessionMode = quiz?.mode || state.quiz_mode || 'quiz';
   const hasScoredQuestions = quizHasScoredQuestions(quiz);
 
@@ -1280,6 +1342,7 @@ async function finishQuiz(pin) {
 
 async function abortGame(pin, reason = 'HOST_ABORTED') {
   clearRoomTimers(pin);
+  roomQuizCache.delete(pin);
   const state = await redis.hgetall(`room:${pin}:state`);
   if (!state || !state.status) return;
 
@@ -1290,16 +1353,71 @@ async function abortGame(pin, reason = 'HOST_ABORTED') {
 }
 
 // ==========================================
+// WERYFIKACJA SESJI HOSTA W SOCKET.IO (OWASP ASVS V3 / V4)
+// ==========================================
+
+async function assertHostSession(socket) {
+  if (!socket.data.user || !socket.data.sidHash) {
+    return null;
+  }
+  const found = await getSessionByHash(redis, socket.data.sidHash, {
+    touch: true,
+  });
+  if (
+    !found ||
+    !found.session.mfaVerified ||
+    found.session.mustChangePassword
+  ) {
+    socket.data.user = null;
+    socket.data.sidHash = null;
+    return null;
+  }
+  return {
+    id: found.session.userId,
+    username: found.session.username,
+    role: found.session.role,
+  };
+}
+
+async function assertRoomOwner(socket, pin) {
+  const user = await assertHostSession(socket);
+  if (!user) {
+    return { error: 'UNAUTHORIZED' };
+  }
+  const cleanPin = String(pin || '').trim();
+  if (!cleanPin) {
+    return { error: 'MISSING_PIN' };
+  }
+  const state = await redis.hgetall(`room:${cleanPin}:state`);
+  if (!state || !state.status) {
+    return { error: 'ROOM_NOT_FOUND' };
+  }
+  if (
+    state.owner_id &&
+    state.owner_id !== user.id &&
+    user.role !== 'superadmin'
+  ) {
+    return { error: 'FORBIDDEN' };
+  }
+  return { user, state, pin: cleanPin };
+}
+
+// ==========================================
 // OBSŁUGA POŁĄCZEŃ WEBSOCKET
 // ==========================================
 
 io.on('connection', (socket) => {
-  // 1. Host (Panel prowadzącego) tworzy pokój
-  socket.on('host_create_room', async ({ quizId }, callback) => {
+  // 1. Host (Panel prowadzącego) tworzy pokój — wymaga ważnej sesji admina
+  socket.on('host_create_room', async ({ quizId } = {}, callback) => {
     try {
-      const targetQuizId = quizId || defaultQuizId;
-      const quiz = quizzes.get(targetQuizId);
-      if (!quiz) return callback({ error: 'QUIZ_NOT_FOUND' });
+      const user = await assertHostSession(socket);
+      if (!user) {
+        return callback?.({ error: 'UNAUTHORIZED' });
+      }
+
+      const targetQuizId = quizId || DEFAULT_QUIZ_ID;
+      const quiz = await getQuizByIdForUser(pool, targetQuizId, user);
+      if (!quiz) return callback?.({ error: 'QUIZ_NOT_FOUND' });
 
       // Jeśli ten kontroler był wcześniej w innym pokoju, opuść stare pokoje
       if (socket.data.pin && socket.data.isController) {
@@ -1309,13 +1427,29 @@ io.on('connection', (socket) => {
 
       const pin = Math.floor(100000 + Math.random() * 900000).toString();
       const quizMode = quiz.mode || 'quiz';
+      const quizSnapshot = {
+        id: quiz.id,
+        title: quiz.title,
+        mode: quizMode,
+        questions: quiz.questions,
+      };
 
       await redis.del(`room:${pin}:leaderboard`);
       await redis.del(`room:${pin}:summaries`);
+      await redis.set(
+        `room:${pin}:quiz`,
+        JSON.stringify(quizSnapshot),
+        'EX',
+        7200
+      );
+      roomQuizCache.set(pin, quizSnapshot);
+
       await redis.hmset(`room:${pin}:state`, {
         status: 'LOBBY',
         quiz_id: targetQuizId,
         quiz_mode: quizMode,
+        owner_id: user.id,
+        owner_name: user.username,
         current_q_index: -1,
         host_socket_id: socket.id,
         auto_next_paused: '0',
@@ -1329,9 +1463,21 @@ io.on('connection', (socket) => {
       socket.data.isHost = true;
       socket.data.isController = true;
 
-      callback({ pin, quiz: { ...quiz, mode: quizMode } });
+      await logAudit(pool, {
+        actorId: user.id,
+        actorName: user.username,
+        eventType: 'GAME_ROOM_CREATED',
+        targetId: pin,
+        ip: socket.handshake.address,
+        userAgent: socket.handshake.headers?.['user-agent'] || null,
+        status: 'SUCCESS',
+        metadata: { quizId: quiz.id, quizTitle: quiz.title },
+      });
+
+      callback?.({ pin, quiz: quizSnapshot });
     } catch (err) {
-      callback({ error: err.message });
+      console.error('[HOST_CREATE_ROOM_ERROR]', err.message);
+      callback?.({ error: 'SERVER_ERROR' });
     }
   });
 
@@ -1407,9 +1553,14 @@ io.on('connection', (socket) => {
   });
 
   // 3. Host uruchamia grę — krótkie odliczanie startowe, a potem podgląd 1. pytania
-  socket.on('host_start_game', async ({ pin }) => {
-    const state = await redis.hgetall(`room:${pin}:state`);
-    if (!state || state.status !== 'LOBBY') return;
+  socket.on('host_start_game', async ({ pin } = {}, callback) => {
+    const auth = await assertRoomOwner(socket, pin);
+    if (auth.error) {
+      callback?.({ error: auth.error });
+      return socket.emit('host_auth_error', { error: auth.error });
+    }
+    const { state } = auth;
+    if (state.status !== 'LOBBY') return;
 
     const now = Date.now();
     await redis.hmset(`room:${pin}:state`, {
@@ -1432,12 +1583,17 @@ io.on('connection', (socket) => {
     }, START_COUNTDOWN_SECONDS * 1000);
 
     roomTimers.set(pin, { countdownTimer });
+    callback?.({ success: true });
   });
 
   // 4. Wymuszenie przejścia dalej przez Hosta (działa w każdej aktywnej fazie)
-  socket.on('host_force_next', async ({ pin }) => {
-    const state = await redis.hgetall(`room:${pin}:state`);
-    if (!state) return;
+  socket.on('host_force_next', async ({ pin } = {}, callback) => {
+    const auth = await assertRoomOwner(socket, pin);
+    if (auth.error) {
+      callback?.({ error: auth.error });
+      return socket.emit('host_auth_error', { error: auth.error });
+    }
+    const { state } = auth;
     const currentIdx = Number(state.current_q_index);
 
     if (state.status === 'COUNTDOWN') {
@@ -1450,12 +1606,18 @@ io.on('connection', (socket) => {
       clearRoomTimers(pin);
       await startQuestionPreview(pin, currentIdx + 1);
     }
+    callback?.({ success: true });
   });
 
   // 4b. Wstrzymanie / wznowienie automatycznego przejścia po wynikach rundy
-  socket.on('host_toggle_pause', async ({ pin }) => {
-    const state = await redis.hgetall(`room:${pin}:state`);
-    if (!state || state.status !== 'LEADERBOARD') return;
+  socket.on('host_toggle_pause', async ({ pin } = {}, callback) => {
+    const auth = await assertRoomOwner(socket, pin);
+    if (auth.error) {
+      callback?.({ error: auth.error });
+      return socket.emit('host_auth_error', { error: auth.error });
+    }
+    const { state } = auth;
+    if (state.status !== 'LEADERBOARD') return;
 
     const currentIdx = Number(state.current_q_index);
     const isCurrentlyPaused = state.auto_next_paused === '1';
@@ -1484,27 +1646,47 @@ io.on('connection', (socket) => {
       }, AUTO_NEXT_SECONDS * 1000);
       roomTimers.set(pin, { autoNextTimer });
     }
+    callback?.({ success: true });
   });
 
   // 4c. Przerwanie gry przez prowadzącego
-  socket.on('host_abort_game', async ({ pin }, callback) => {
+  socket.on('host_abort_game', async ({ pin } = {}, callback) => {
     try {
+      const auth = await assertRoomOwner(socket, pin);
+      if (auth.error) {
+        callback?.({ error: auth.error });
+        return socket.emit('host_auth_error', { error: auth.error });
+      }
       await abortGame(pin, 'HOST_ABORTED');
       if (socket.data.pin === pin) {
         socket.leave(`host:${pin}`);
         socket.leave(`controller:${pin}`);
         socket.data.pin = null;
       }
+      await logAudit(pool, {
+        actorId: auth.user.id,
+        actorName: auth.user.username,
+        eventType: 'GAME_ROOM_ABORTED',
+        targetId: pin,
+        ip: socket.handshake.address,
+        status: 'SUCCESS',
+      });
       callback?.({ success: true });
     } catch (err) {
-      callback?.({ error: err.message });
+      callback?.({ error: 'SERVER_ERROR' });
     }
   });
 
   // 4d. Zamknięcie sesji po zakończeniu podium (powrót prowadzącego do menu)
-  socket.on('host_leave_room', async ({ pin }, callback) => {
+  socket.on('host_leave_room', async ({ pin } = {}, callback) => {
     try {
+      const auth = await assertRoomOwner(socket, pin);
+      if (auth.error) {
+        callback?.({ error: auth.error });
+        return;
+      }
       clearRoomTimers(pin);
+      roomQuizCache.delete(pin);
       if (socket.data.pin === pin) {
         socket.leave(`host:${pin}`);
         socket.leave(`controller:${pin}`);
@@ -1512,7 +1694,7 @@ io.on('connection', (socket) => {
       }
       callback?.({ success: true });
     } catch (err) {
-      callback?.({ error: err.message });
+      callback?.({ error: 'SERVER_ERROR' });
     }
   });
 
@@ -1531,7 +1713,7 @@ io.on('connection', (socket) => {
         return socket.emit('error_msg', 'TIMEOUT_OR_INVALID_STATE');
       }
 
-      const quiz = quizzes.get(state.quiz_id);
+      const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
       const question = quiz?.questions?.[qIndex];
       if (!quiz || !question) {
         return socket.emit('error_msg', 'INVALID_QUESTION');
@@ -1656,15 +1838,28 @@ io.on('connection', (socket) => {
 });
 
 const PORT = Number(process.env.PORT) || 3001;
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  ╔══════════════════════════════════════════╗`);
-  console.log(`  ║  [CYBER_QUIZ_SERVER] ONLINE              ║`);
-  console.log(`  ║  Port: ${PORT}                              ║`);
-  console.log(`  ║  Redis: ${REDIS_HOST}:${REDIS_PORT}`);
-  console.log(`  ║  Static UI: ${fs.existsSync(INDEX_HTML) ? 'ENABLED' : 'DEV (no dist)'}`);
-  console.log(`  ║  WebSocket: perMessageDeflate OFF        ║`);
-  console.log(`  ╚══════════════════════════════════════════╝\n`);
-});
+
+async function startServer() {
+  try {
+    await initDatabase(pool);
+  } catch (err) {
+    console.error('[POSTGRES_INIT_ERROR] Nie udało się zainicjalizować bazy PostgreSQL:', err.message);
+    process.exit(1);
+  }
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n  ╔══════════════════════════════════════════╗`);
+    console.log(`  ║  [CYBER_QUIZ_SERVER] ONLINE              ║`);
+    console.log(`  ║  Port: ${PORT}                              ║`);
+    console.log(`  ║  Redis: ${REDIS_HOST}:${REDIS_PORT}`);
+    console.log(`  ║  Postgres: CONNECTED (migrations OK)`);
+    console.log(`  ║  Static UI: ${fs.existsSync(INDEX_HTML) ? 'ENABLED' : 'DEV (no dist)'}`);
+    console.log(`  ║  WebSocket: perMessageDeflate OFF        ║`);
+    console.log(`  ╚══════════════════════════════════════════╝\n`);
+  });
+}
+
+startServer();
 
 function shutdown(signal) {
   console.log(`\n[CYBER_QUIZ_SERVER] Otrzymano ${signal}, zamykanie...`);
@@ -1677,6 +1872,11 @@ function shutdown(signal) {
         await redis.quit();
       } catch (_err) {
         redis.disconnect();
+      }
+      try {
+        await pool.end();
+      } catch (_err) {
+        // ignore
       }
       process.exit(0);
     });
