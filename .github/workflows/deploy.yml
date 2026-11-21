@@ -1,0 +1,150 @@
+name: CI/CD — Test, Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test-and-build:
+    name: Test & Build
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            server/package-lock.json
+            client/package-lock.json
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Check JS syntax
+        run: |
+          node --check server/index.js
+          node --check scripts/smoke-test.mjs
+          node --check scripts/load-test.mjs
+
+      - name: Build frontend bundle (Vite)
+        working-directory: client
+        run: npm run build
+
+      - name: Verify frontend build output
+        run: test -f client/dist/index.html
+
+      - name: Run automated smoke & E2E tests
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+        run: node scripts/smoke-test.mjs
+
+      - name: Build production Docker image
+        run: docker build -t cyber-quiz:ci .
+
+  deploy:
+    name: Deploy to 2115.2115.xyz
+    needs: test-and-build
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate deployment secrets
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          missing=0
+          for var in SSH_HOST SSH_USER SSH_PRIVATE_KEY; do
+            if [ -z "${!var}" ]; then
+              echo "::error::Brak wymaganego sekretu GitHub Actions: $var"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Setup SSH configuration
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          PORT="${SSH_PORT:-22}"
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy on remote server via SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+          SWAG_CONTAINER: ${{ vars.SWAG_CONTAINER }}
+        run: |
+          PORT="${SSH_PORT:-22}"
+          ssh -i ~/.ssh/deploy_key \
+              -p "$PORT" \
+              -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              "${SSH_USER}@${SSH_HOST}" \
+              bash -s -- "${DEPLOY_DIR:-}" "${SWAG_CONTAINER:-swag}" <<'EOF'
+          set -Eeuo pipefail
+          TARGET_DIR="${1:-$HOME/containers/cyber-quiz}"
+          TARGET_DIR="${TARGET_DIR/#\~/$HOME}"
+          SWAG_NAME="${2:-swag}"
+
+          cd "$TARGET_DIR"
+          git fetch --prune origin main
+          git checkout main
+          git reset --hard origin/main
+          DEPLOY_DIR="$TARGET_DIR" SWAG_CONTAINER="$SWAG_NAME" bash scripts/deploy.sh
+          EOF
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -rf ~/.ssh/deploy_key
