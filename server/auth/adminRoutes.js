@@ -30,9 +30,11 @@ export function createAdminRouter({ pool, redis, allowedOrigins }) {
       const { rows } = await pool.query(
         `SELECT u.id, u.username, u.role, u.is_active, u.must_change_password,
                 u.failed_login_attempts, u.locked_until, u.created_at, u.last_login_at,
-                COUNT(q.id)::int AS quizzes_count
+                COUNT(DISTINCT q.id)::int AS quizzes_count,
+                COUNT(DISTINCT w.id)::int AS mfa_credentials_count
          FROM users u
          LEFT JOIN quizzes q ON q.owner_id = u.id
+         LEFT JOIN webauthn_credentials w ON w.user_id = u.id
          GROUP BY u.id
          ORDER BY (u.role = 'superadmin') DESC, u.created_at ASC`
       );
@@ -49,6 +51,7 @@ export function createAdminRouter({ pool, redis, allowedOrigins }) {
           createdAt: r.created_at,
           lastLoginAt: r.last_login_at,
           quizzesCount: r.quizzes_count || 0,
+          mfaCredentialsCount: r.mfa_credentials_count || 0,
         }))
       );
     } catch (err) {

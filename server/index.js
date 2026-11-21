@@ -20,6 +20,8 @@ import {
 } from './db/quizRepository.js';
 import { createAuthRouter } from './auth/authRoutes.js';
 import { createAdminRouter } from './auth/adminRoutes.js';
+import { createMfaRouter } from './auth/mfaRoutes.js';
+import { getWebAuthnConfig } from './auth/webauthn.js';
 import {
   createRequireAuth,
   createRequireCsrf,
@@ -362,10 +364,37 @@ function normalizeAndValidateQuestions(rawQuestions, rawMode = 'quiz') {
 
 const requireAuth = createRequireAuth(redis);
 const requireCsrf = createRequireCsrf(ALLOWED_ORIGINS);
+const PORT = Number(process.env.PORT) || 3001;
+
+let webauthnConfig;
+try {
+  webauthnConfig = getWebAuthnConfig({
+    allowedOrigins: ALLOWED_ORIGINS,
+    isProd: IS_PROD,
+    port: PORT,
+  });
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}
 
 app.use(
+  '/api/auth/mfa',
+  createMfaRouter({
+    pool,
+    redis,
+    allowedOrigins: ALLOWED_ORIGINS,
+    webauthnConfig,
+  })
+);
+app.use(
   '/api/auth',
-  createAuthRouter({ pool, redis, allowedOrigins: ALLOWED_ORIGINS })
+  createAuthRouter({
+    pool,
+    redis,
+    allowedOrigins: ALLOWED_ORIGINS,
+    webauthnConfig,
+  })
 );
 app.use(
   '/api/admin',
@@ -1836,8 +1865,6 @@ io.on('connection', (socket) => {
     }
   });
 });
-
-const PORT = Number(process.env.PORT) || 3001;
 
 async function startServer() {
   try {

@@ -44,7 +44,10 @@ export function LoginView({ onAuthenticated }) {
 
       setCsrfToken(data.csrfToken);
       setPassword('');
-      onAuthenticated(data.user);
+      onAuthenticated({
+        status: data.status || 'AUTHENTICATED',
+        user: data.user,
+      });
     } catch {
       setError('Nie udało się połączyć z serwerem. Spróbuj ponownie.');
     } finally {

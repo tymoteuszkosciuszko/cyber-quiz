@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_logs (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_logs (event_type);
+
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  credential_id  TEXT NOT NULL UNIQUE,
+  public_key     BYTEA NOT NULL,
+  counter        BIGINT NOT NULL DEFAULT 0,
+  transports     TEXT[] NOT NULL DEFAULT '{}',
+  device_type    TEXT NOT NULL DEFAULT 'singleDevice',
+  backed_up      BOOLEAN NOT NULL DEFAULT FALSE,
+  aaguid         TEXT,
+  name           TEXT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_used_at   TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_webauthn_user_id ON webauthn_credentials (user_id);
 `;
 
 export async function initDatabase(pool) {

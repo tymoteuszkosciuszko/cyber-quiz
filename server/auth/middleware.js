@@ -34,7 +34,11 @@ export function isOriginAllowed(origin, allowedOrigins, reqHost = null) {
 
 export function createRequireAuth(
   redis,
-  { allowMustChangePassword = false } = {}
+  {
+    allowMustChangePassword = false,
+    allowMfaPending = false,
+    allowedMfaStages = null,
+  } = {}
 ) {
   return async function requireAuth(req, res, next) {
     try {
@@ -52,10 +56,27 @@ export function createRequireAuth(
       const { sidHash, session } = found;
 
       if (!session.mfaVerified) {
-        return res.status(403).json({ error: 'MFA_REQUIRED' });
+        if (!allowMfaPending) {
+          return res.status(403).json({
+            error:
+              session.mfaStage === 'ENROLL'
+                ? 'MFA_ENROLLMENT_REQUIRED'
+                : 'MFA_REQUIRED',
+          });
+        }
+        if (
+          Array.isArray(allowedMfaStages) &&
+          !allowedMfaStages.includes(session.mfaStage)
+        ) {
+          return res.status(403).json({ error: 'INVALID_MFA_STAGE' });
+        }
       }
 
-      if (session.mustChangePassword && !allowMustChangePassword) {
+      if (
+        session.mfaVerified &&
+        session.mustChangePassword &&
+        !allowMustChangePassword
+      ) {
         return res.status(403).json({ error: 'MUST_CHANGE_PASSWORD' });
       }
 
@@ -67,6 +88,8 @@ export function createRequireAuth(
         username: session.username,
         role: session.role,
         mustChangePassword: Boolean(session.mustChangePassword),
+        mfaVerified: Boolean(session.mfaVerified),
+        mfaStage: session.mfaVerified ? null : session.mfaStage || 'VERIFY',
       };
 
       return next();

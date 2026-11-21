@@ -29,6 +29,11 @@ import {
   revokeAllUserSessions,
   setSessionCookie,
 } from './sessions.js';
+import {
+  PRE_MFA_ENROLL_TTL_SECONDS,
+  PRE_MFA_VERIFY_TTL_SECONDS,
+  countUserWebAuthnCredentials,
+} from './webauthn.js';
 
 const loginSchema = z.object({
   username: z.string().trim().min(1).max(64),
@@ -40,10 +45,14 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(1).max(MAX_PASSWORD_LENGTH),
 });
 
-export function createAuthRouter({ pool, redis, allowedOrigins }) {
+export function createAuthRouter({ pool, redis, allowedOrigins, webauthnConfig }) {
   const router = express.Router();
   const requireAuthAny = createRequireAuth(redis, {
     allowMustChangePassword: true,
+  });
+  const requireAuthOrMfaPending = createRequireAuth(redis, {
+    allowMustChangePassword: true,
+    allowMfaPending: true,
   });
   const requireCsrf = createRequireCsrf(allowedOrigins);
 
@@ -172,6 +181,64 @@ export function createAuthRouter({ pool, redis, allowedOrigins }) {
         return res.status(401).json({ error: 'INVALID_CREDENTIALS' });
       }
 
+      const previousSid = getSessionCookieFromHeaders(req.headers);
+      if (previousSid) {
+        await destroySession(redis, previousSid);
+      }
+
+      // Dwuetapowe uwierzytelnianie MFA (WebAuthn / FIDO2) dla konta superadmina
+      if (user.role === 'superadmin') {
+        const mfaCount = await countUserWebAuthnCredentials(pool, user.id);
+        const enforcement = webauthnConfig?.enforcement || 'required';
+
+        if (mfaCount > 0 || enforcement === 'required') {
+          const isEnroll = mfaCount === 0;
+          const mfaStage = isEnroll ? 'ENROLL' : 'VERIFY';
+          const status = isEnroll ? 'MFA_ENROLLMENT_REQUIRED' : 'MFA_REQUIRED';
+
+          const { sid, session, maxAgeSeconds } = await createSession(
+            redis,
+            user,
+            meta,
+            {
+              mfaVerified: false,
+              mfaStage,
+              ttlOverrideSeconds: isEnroll
+                ? PRE_MFA_ENROLL_TTL_SECONDS
+                : PRE_MFA_VERIFY_TTL_SECONDS,
+            }
+          );
+          setSessionCookie(res, sid, maxAgeSeconds);
+
+          await logAudit(pool, {
+            actorId: user.id,
+            actorName: user.username,
+            eventType: isEnroll
+              ? 'AUTH_LOGIN_MFA_ENROLLMENT_REQUIRED'
+              : 'AUTH_LOGIN_MFA_REQUIRED',
+            ip: meta.ip,
+            userAgent: meta.userAgent,
+            status: 'SUCCESS',
+            metadata: { role: user.role, credentialsCount: mfaCount },
+          });
+
+          return res.json({
+            status,
+            csrfToken: session.csrfToken,
+            user: {
+              id: user.id,
+              username: user.username,
+              role: user.role,
+              mustChangePassword: Boolean(user.must_change_password),
+              mfaVerified: false,
+              mfaStage,
+              mfaCredentialsCount: mfaCount,
+              mfaEnforcement: enforcement,
+            },
+          });
+        }
+      }
+
       // Poprawne logowanie: zeruj licznik błędów + zregeneruj sesję (ASVS V3.2.1)
       await pool.query(
         `UPDATE users
@@ -183,15 +250,11 @@ export function createAuthRouter({ pool, redis, allowedOrigins }) {
         [user.id]
       );
 
-      const previousSid = getSessionCookieFromHeaders(req.headers);
-      if (previousSid) {
-        await destroySession(redis, previousSid);
-      }
-
       const { sid, session, maxAgeSeconds } = await createSession(
         redis,
         user,
-        meta
+        meta,
+        { mfaVerified: true }
       );
       setSessionCookie(res, sid, maxAgeSeconds);
 
@@ -205,17 +268,24 @@ export function createAuthRouter({ pool, redis, allowedOrigins }) {
         metadata: { role: user.role },
       });
 
+      const userPayload = {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        mustChangePassword: Boolean(user.must_change_password),
+        mfaVerified: true,
+      };
+      if (user.role === 'superadmin') {
+        userPayload.mfaCredentialsCount = 0;
+        userPayload.mfaEnforcement = webauthnConfig?.enforcement || 'required';
+      }
+
       return res.json({
         status: user.must_change_password
           ? 'MUST_CHANGE_PASSWORD'
           : 'AUTHENTICATED',
         csrfToken: session.csrfToken,
-        user: {
-          id: user.id,
-          username: user.username,
-          role: user.role,
-          mustChangePassword: Boolean(user.must_change_password),
-        },
+        user: userPayload,
       });
     } catch (err) {
       console.error('[LOGIN_ERROR]', err.message);
@@ -224,38 +294,65 @@ export function createAuthRouter({ pool, redis, allowedOrigins }) {
   });
 
   // GET /api/auth/me
-  router.get('/me', requireAuthAny, (req, res) => {
-    res.json({
-      status: req.user.mustChangePassword
-        ? 'MUST_CHANGE_PASSWORD'
-        : 'AUTHENTICATED',
-      csrfToken: req.session.csrfToken,
-      user: req.user,
-    });
-  });
-
-  // POST /api/auth/logout
-  router.post('/logout', requireAuthAny, requireCsrf, async (req, res) => {
-    const meta = extractReqMeta(req);
+  router.get('/me', requireAuthOrMfaPending, async (req, res) => {
     try {
-      await destroySession(redis, req.sid);
-      clearSessionCookie(res);
+      const userPayload = { ...req.user };
+      if (req.user.role === 'superadmin') {
+        userPayload.mfaCredentialsCount = await countUserWebAuthnCredentials(
+          pool,
+          req.user.id
+        );
+        userPayload.mfaEnforcement = webauthnConfig?.enforcement || 'required';
+      }
 
-      await logAudit(pool, {
-        actorId: req.user.id,
-        actorName: req.user.username,
-        eventType: 'AUTH_LOGOUT',
-        ip: meta.ip,
-        userAgent: meta.userAgent,
-        status: 'SUCCESS',
+      let status = 'AUTHENTICATED';
+      if (!req.user.mfaVerified) {
+        status =
+          req.user.mfaStage === 'ENROLL'
+            ? 'MFA_ENROLLMENT_REQUIRED'
+            : 'MFA_REQUIRED';
+      } else if (req.user.mustChangePassword) {
+        status = 'MUST_CHANGE_PASSWORD';
+      }
+
+      return res.json({
+        status,
+        csrfToken: req.session.csrfToken,
+        user: userPayload,
       });
-
-      return res.json({ success: true });
     } catch (err) {
-      console.error('[LOGOUT_ERROR]', err.message);
+      console.error('[AUTH_ME_ERROR]', err.message);
       return res.status(500).json({ error: 'SERVER_ERROR' });
     }
   });
+
+  // POST /api/auth/logout
+  router.post(
+    '/logout',
+    requireAuthOrMfaPending,
+    requireCsrf,
+    async (req, res) => {
+      const meta = extractReqMeta(req);
+      try {
+        await destroySession(redis, req.sid);
+        clearSessionCookie(res);
+
+        await logAudit(pool, {
+          actorId: req.user.id,
+          actorName: req.user.username,
+          eventType: 'AUTH_LOGOUT',
+          ip: meta.ip,
+          userAgent: meta.userAgent,
+          status: 'SUCCESS',
+        });
+
+        return res.json({ success: true });
+      } catch (err) {
+        console.error('[LOGOUT_ERROR]', err.message);
+        return res.status(500).json({ error: 'SERVER_ERROR' });
+      }
+    }
+  );
 
   // POST /api/auth/logout-all
   router.post('/logout-all', requireAuthAny, requireCsrf, async (req, res) => {
@@ -376,15 +473,24 @@ export function createAuthRouter({ pool, redis, allowedOrigins }) {
           status: 'SUCCESS',
         });
 
+        const changedUserPayload = {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          mustChangePassword: false,
+          mfaVerified: true,
+        };
+        if (user.role === 'superadmin') {
+          changedUserPayload.mfaCredentialsCount =
+            await countUserWebAuthnCredentials(pool, user.id);
+          changedUserPayload.mfaEnforcement =
+            webauthnConfig?.enforcement || 'required';
+        }
+
         return res.json({
           status: 'AUTHENTICATED',
           csrfToken: session.csrfToken,
-          user: {
-            id: user.id,
-            username: user.username,
-            role: user.role,
-            mustChangePassword: false,
-          },
+          user: changedUserPayload,
         });
       } catch (err) {
         console.error('[CHANGE_PASSWORD_ERROR]', err.message);

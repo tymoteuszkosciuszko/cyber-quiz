@@ -45,7 +45,10 @@ export function ForcePasswordChangeView({ user, onPasswordChanged, onLogout }) {
       }
 
       setCsrfToken(data.csrfToken);
-      onPasswordChanged(data.user);
+      onPasswordChanged({
+        status: data.status || 'AUTHENTICATED',
+        user: data.user,
+      });
     } catch {
       setError('Błąd komunikacji z serwerem.');
     } finally {

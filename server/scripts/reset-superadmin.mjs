@@ -3,6 +3,7 @@
  * Awaryjny skrypt CLI do zarządzania jedynym kontem superadmina:
  * - zmiana loginu (nazwy użytkownika),
  * - reset hasła (oraz odblokowanie / aktywacja konta),
+ * - podgląd i awaryjny reset kluczy MFA (WebAuthn / YubiKey),
  * - natychmiastowe unieważnienie wszystkich aktywnych sesji w Redisie.
  *
  * Użycie interaktywne:
@@ -12,6 +13,8 @@
  * Użycie z parametrami:
  *   node server/scripts/reset-superadmin.mjs --username nowy_login --keep-password
  *   node server/scripts/reset-superadmin.mjs --username nowy_login --password 'NoweSilneHaslo123!'
+ *   node server/scripts/reset-superadmin.mjs --list-mfa
+ *   node server/scripts/reset-superadmin.mjs --reset-mfa
  *   SUPERADMIN_USERNAME=nowy_login node server/scripts/reset-superadmin.mjs --keep-password
  */
 
@@ -25,7 +28,7 @@ import { logAudit } from '../auth/audit.js';
 
 function printHelp() {
   console.log(`
-Cyber Quiz — CLI zarządzania kontem superadmina (zmiana loginu i/lub reset hasła)
+Cyber Quiz — CLI zarządzania kontem superadmina (login, hasło, MFA WebAuthn)
 
 Użycie:
   node server/scripts/reset-superadmin.mjs [opcje]
@@ -34,6 +37,8 @@ Opcje:
   -u, --username <login>    Nowa nazwa użytkownika (3-32 znaki: A-Z, 0-9, . _ -)
   -p, --password <hasło>    Nowe silne hasło (min. 12 znaków)
   --keep-password           Zmień tylko login, bez pytania o nowe hasło
+  --list-mfa                Wyświetl listę zarejestrowanych kluczy MFA superadmina
+  --reset-mfa               Awaryjnie usuń wszystkie klucze MFA (YubiKey/FIDO2) i wyloguj sesje
   -h, --help                Wyświetl pomoc
 
 Zmienne środowiskowe (opcjonalne):
@@ -47,6 +52,8 @@ function parseArgs(argv) {
     username: process.env.SUPERADMIN_USERNAME || '',
     password: process.env.SUPERADMIN_PASSWORD || '',
     keepPassword: false,
+    listMfa: false,
+    resetMfa: false,
     help: false,
   };
 
@@ -56,6 +63,10 @@ function parseArgs(argv) {
       opts.help = true;
     } else if (arg === '--keep-password') {
       opts.keepPassword = true;
+    } else if (arg === '--list-mfa') {
+      opts.listMfa = true;
+    } else if (arg === '--reset-mfa') {
+      opts.resetMfa = true;
     } else if ((arg === '-u' || arg === '--username') && argv[i + 1]) {
       opts.username = argv[++i];
     } else if ((arg === '-p' || arg === '--password') && argv[i + 1]) {
@@ -138,11 +149,38 @@ async function main() {
       process.exit(1);
     }
 
+    // Tryb podglądu kluczy MFA (--list-mfa)
+    if (opts.listMfa && !opts.resetMfa && !opts.username && !opts.password) {
+      const credsRes = await pool.query(
+        `SELECT id, name, transports, device_type, backed_up, counter, created_at, last_used_at
+         FROM webauthn_credentials
+         WHERE user_id = $1
+         ORDER BY created_at ASC`,
+        [superadmin.id]
+      );
+      console.log(`Superadmin: "${superadmin.username}" (ID: ${superadmin.id})`);
+      if (credsRes.rows.length === 0) {
+        console.log('Brak zarejestrowanych kluczy MFA (WebAuthn).');
+      } else {
+        console.log(`Zarejestrowane klucze MFA (${credsRes.rows.length}):`);
+        for (const c of credsRes.rows) {
+          const transports = Array.isArray(c.transports) && c.transports.length > 0
+            ? c.transports.join(',')
+            : 'brak';
+          console.log(
+            `  - [${c.id}] "${c.name}" | typ: ${c.device_type} | transporty: ${transports} | licznik: ${c.counter} | dodano: ${c.created_at.toISOString()} | ostatnio: ${c.last_used_at ? c.last_used_at.toISOString() : 'nigdy'}`
+          );
+        }
+      }
+      process.exit(0);
+    }
+
     const isInteractive = Boolean(process.stdin.isTTY);
     let requestedUsername = opts.username.trim();
     let requestedPassword = opts.password;
+    const mfaOnlyReset = opts.resetMfa && !requestedUsername && !requestedPassword;
 
-    if (isInteractive && !requestedUsername && !requestedPassword) {
+    if (isInteractive && !requestedUsername && !requestedPassword && !opts.resetMfa) {
       console.log(`Aktualny login superadmina: "${superadmin.username}"`);
       const enteredUser = await ask(
         `Nowy login (Enter, aby zachować "${superadmin.username}"): `
@@ -182,7 +220,7 @@ async function main() {
     }
 
     // Opcjonalne pytanie o nowe hasło w trybie interaktywnym
-    if (!opts.keepPassword && !requestedPassword && isInteractive) {
+    if (!mfaOnlyReset && !opts.keepPassword && !requestedPassword && isInteractive) {
       const promptMsg = usernameChanged
         ? 'Nowe silne hasło (min. 12 znaków; Enter, aby zachować dotychczasowe): '
         : 'Nowe silne hasło (min. 12 znaków): ';
@@ -198,6 +236,7 @@ async function main() {
 
     let passwordHash = null;
     const passwordChanged = Boolean(requestedPassword);
+    const mfaReset = Boolean(opts.resetMfa);
 
     if (passwordChanged) {
       const pwdCheck = validatePassword(requestedPassword, nextUsername);
@@ -208,7 +247,7 @@ async function main() {
       passwordHash = await hashPassword(pwdCheck.normalized);
     }
 
-    if (!usernameChanged && !passwordChanged) {
+    if (!usernameChanged && !passwordChanged && !mfaReset) {
       console.log('Nie wprowadzono żadnych zmian.');
       process.exit(0);
     }
@@ -227,7 +266,7 @@ async function main() {
          WHERE id = $1`,
         [superadmin.id, nextUsername, nextUsernameNormalized, passwordHash]
       );
-    } else {
+    } else if (usernameChanged) {
       await pool.query(
         `UPDATE users
          SET username = $2,
@@ -238,30 +277,55 @@ async function main() {
       );
     }
 
-    // Zawsze unieważniamy aktywne sesje (odświeżenie loginu w sesji i bezpieczeństwo)
+    let removedMfaCount = 0;
+    if (mfaReset) {
+      const delRes = await pool.query(
+        `DELETE FROM webauthn_credentials WHERE user_id = $1`,
+        [superadmin.id]
+      );
+      removedMfaCount = delRes.rowCount || 0;
+    }
+
+    // Zawsze unieważniamy aktywne sesje (odświeżenie loginu/MFA w sesji i bezpieczeństwo)
     const revoked = await revokeAllUserSessions(redis, superadmin.id);
 
-    const eventType =
-      usernameChanged && passwordChanged
-        ? 'SUPERADMIN_CLI_RENAMED_AND_PASSWORD_RESET'
-        : usernameChanged
-          ? 'SUPERADMIN_CLI_RENAMED'
-          : 'SUPERADMIN_CLI_PASSWORD_RESET';
+    if (usernameChanged || passwordChanged) {
+      const eventType =
+        usernameChanged && passwordChanged
+          ? 'SUPERADMIN_CLI_RENAMED_AND_PASSWORD_RESET'
+          : usernameChanged
+            ? 'SUPERADMIN_CLI_RENAMED'
+            : 'SUPERADMIN_CLI_PASSWORD_RESET';
 
-    await logAudit(pool, {
-      actorId: superadmin.id,
-      actorName: nextUsername,
-      eventType,
-      targetId: superadmin.id,
-      status: 'SUCCESS',
-      metadata: {
-        previousUsername: superadmin.username,
-        newUsername: nextUsername,
-        usernameChanged,
-        passwordChanged,
-        revokedSessions: revoked,
-      },
-    });
+      await logAudit(pool, {
+        actorId: superadmin.id,
+        actorName: nextUsername,
+        eventType,
+        targetId: superadmin.id,
+        status: 'SUCCESS',
+        metadata: {
+          previousUsername: superadmin.username,
+          newUsername: nextUsername,
+          usernameChanged,
+          passwordChanged,
+          revokedSessions: revoked,
+        },
+      });
+    }
+
+    if (mfaReset) {
+      await logAudit(pool, {
+        actorId: superadmin.id,
+        actorName: nextUsername,
+        eventType: 'SUPERADMIN_CLI_MFA_RESET',
+        targetId: superadmin.id,
+        status: 'SUCCESS',
+        metadata: {
+          removedCredentials: removedMfaCount,
+          revokedSessions: revoked,
+        },
+      });
+    }
 
     const summaryParts = [];
     if (usernameChanged) {
@@ -271,6 +335,9 @@ async function main() {
     }
     if (passwordChanged) {
       summaryParts.push('zresetowano hasło');
+    }
+    if (mfaReset) {
+      summaryParts.push(`usunięto kluczy MFA: ${removedMfaCount}`);
     }
     console.log(
       `[OK] Superadmin zaktualizowany (${summaryParts.join(', ')}). Unieważniono sesji: ${revoked}.`
