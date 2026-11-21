@@ -22,9 +22,34 @@ try {
   }
 }
 
+const DEFAULT_WORD_CLOUD_POOL = [
+  'Bezpieczeństwo',
+  'Szyfrowanie',
+  'Firewall',
+  'Phishing',
+  'Linux',
+  'Hasła',
+  'Zero Trust',
+  'Backup',
+  'VPN',
+  'Pentesty',
+  'Cloud',
+  'Aktualizacje',
+  'MFA',
+  'SIEM',
+  'SOC',
+  'Ransomware',
+  'Docker',
+  'Kubernetes',
+  'Privacy',
+  'OWASP',
+];
+
 function printHelp() {
   console.log(`
 Cyber Quiz — Skrypt testowania obciążenia (symulacja X graczy)
+Obsługuje wszystkie tryby (quiz, opinie, mieszany) oraz 5 form pytań:
+ABCD, Prawda/Fałsz, Slider, Ankieta, Chmura słów.
 
 Użycie:
   node scripts/load-test.mjs --pin <PIN> --players <X> [opcje]
@@ -40,15 +65,18 @@ Parametry:
   --ramp-up <ms>                Czas rozłożenia dołączania graczy w ms (domyślnie: auto, 0 = naraz)
   --answer-rate <0..1>          Odsetek graczy odpowiadających na pytanie (domyślnie: 1)
   --prefix <tekst>              Prefiks nicku bota (domyślnie: BOT)
+  --words <a,b,c>               Własna lista haseł dla pytań typu chmura słów (oddzielone przecinkiem)
   --transport <ws|polling|auto> Transport Socket.IO (domyślnie: ws)
-  --auto-host                   Tryb autonomiczny: sam tworzy pokój, startuje grę i zamyka po podium
-  --quiz <quizId>               ID quizu dla trybu --auto-host
+  --auto-host                   Tryb autonomiczny: sam tworzy pokój, startuje grę i zamyka po zakończeniu
+  --quiz <quizId>               ID zestawu dla --auto-host (np. default-cyber-quiz, demo-mixed-session, demo-opinion-session)
   -h, --help                    Wyświetla tę pomoc
 
 Przykłady:
   node scripts/load-test.mjs --pin 482910 --players 200
   node scripts/load-test.mjs 250 -p 482910 --min-delay 100 --max-delay 3000 --ramp-up 2000
   node scripts/load-test.mjs --auto-host -n 200 --ramp-up 0
+  node scripts/load-test.mjs --auto-host --quiz demo-mixed-session -n 50
+  node scripts/load-test.mjs --auto-host --quiz demo-opinion-session -n 50
 `);
 }
 
@@ -62,6 +90,7 @@ function parseArgs(argv) {
     rampUp: null,
     answerRate: 1,
     prefix: 'BOT',
+    words: DEFAULT_WORD_CLOUD_POOL,
     transport: 'ws',
     autoHost: false,
     quizId: undefined,
@@ -104,6 +133,13 @@ function parseArgs(argv) {
       i++;
     } else if (arg === '--prefix') {
       opts.prefix = String(next ?? 'BOT').trim();
+      i++;
+    } else if (arg === '--words') {
+      const parsed = String(next ?? '')
+        .split(',')
+        .map((w) => w.trim())
+        .filter(Boolean);
+      if (parsed.length > 0) opts.words = parsed;
       i++;
     } else if (arg === '--transport') {
       opts.transport = String(next ?? 'ws').trim().toLowerCase();
@@ -190,6 +226,54 @@ function fmtMs(ms) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function pickSliderValue(min, max, step) {
+  const safeMin = Number.isFinite(Number(min)) ? Number(min) : 0;
+  const safeMax = Number.isFinite(Number(max)) ? Number(max) : 100;
+  const safeStep = Number(step) > 0 ? Number(step) : 1;
+  // Lekki rozkład dzwonowy (średnia dwóch losowań), aby histogram wyglądał realistycznie
+  const u = (Math.random() + Math.random()) / 2;
+  const raw = safeMin + u * (safeMax - safeMin);
+  const snapped = safeMin + Math.round((raw - safeMin) / safeStep) * safeStep;
+  const clamped = Math.min(safeMax, Math.max(safeMin, snapped));
+  return Number(clamped.toFixed(6));
+}
+
+function pickWordCloudEntry(pool, maxLength = 32) {
+  const list = Array.isArray(pool) && pool.length > 0 ? pool : DEFAULT_WORD_CLOUD_POOL;
+  // Rozkład ważony (kwadrat losowej liczby faworyzuje pierwsze hasła, dając wyraźną chmurę słów)
+  const idx = Math.min(list.length - 1, Math.floor(Math.pow(Math.random(), 1.6) * list.length));
+  const baseWord = list[idx];
+  // Czasem wylosuj inną wielkość liter, aby przetestować normalizację po stronie serwera
+  const variant =
+    Math.random() < 0.2 ? baseWord.toLowerCase() : baseWord;
+  return variant.slice(0, Math.max(1, Number(maxLength) || 32));
+}
+
+function buildAnswerPayload(questionData, wordsPool) {
+  const qType = questionData.questionType || 'abcd';
+  if (qType === 'slider') {
+    return {
+      value: pickSliderValue(
+        questionData.sliderMin,
+        questionData.sliderMax,
+        questionData.sliderStep
+      ),
+    };
+  }
+  if (qType === 'word_cloud') {
+    return {
+      text: pickWordCloudEntry(wordsPool, questionData.maxLength),
+    };
+  }
+  const optionsCount = Math.max(
+    1,
+    Number(questionData.optionsCount) || (qType === 'true_false' ? 2 : 4)
+  );
+  return {
+    answerIndex: Math.floor(Math.random() * optionsCount),
+  };
+}
+
 async function main() {
   let opts;
   try {
@@ -228,21 +312,26 @@ async function main() {
   let podiumPrinted = false;
   let podiumFirstAt = null;
   let podiumFinalizeTimer = null;
+  let detectedSessionMode = null;
+  let detectedHasScored = true;
   const podiumResults = [];
 
   let hostSocket = null;
   let activePin = opts.pin;
   let isShuttingDown = false;
 
-  function getRound(qIndex, totalQuestions = '?') {
+  function getRound(qIndex, totalQuestions = '?', questionType = null, scored = null) {
     if (!rounds.has(qIndex)) {
       rounds.set(qIndex, {
         qIndex,
         totalQuestions,
+        questionType: questionType || 'abcd',
+        scored: scored !== null ? scored : true,
         sent: 0,
         locked: 0,
         rejected: 0,
         correct: 0,
+        submitted: 0,
         ended: 0,
         latencies: [],
         firstEndAt: null,
@@ -250,6 +339,11 @@ async function main() {
         printed: false,
         flushTimer: null,
       });
+    } else {
+      const r = rounds.get(qIndex);
+      if (totalQuestions !== '?') r.totalQuestions = totalQuestions;
+      if (questionType) r.questionType = questionType;
+      if (scored !== null) r.scored = scored;
     }
     return rounds.get(qIndex);
   }
@@ -264,13 +358,27 @@ async function main() {
       round.firstEndAt !== null && round.lastEndAt !== null
         ? round.lastEndAt - round.firstEndAt
         : 0;
-    const correctPct = round.ended > 0 ? ((round.correct / round.ended) * 100).toFixed(1) : '0.0';
+
+    let outcomeSegment;
+    if (round.scored === false) {
+      const subPct =
+        round.ended > 0
+          ? ((round.submitted / round.ended) * 100).toFixed(1)
+          : '0.0';
+      outcomeSegment = `Głosy: ${round.submitted} (${subPct}%)`;
+    } else {
+      const correctPct =
+        round.ended > 0
+          ? ((round.correct / round.ended) * 100).toFixed(1)
+          : '0.0';
+      outcomeSegment = `Poprawne: ${round.correct} (${correctPct}%)`;
+    }
 
     console.log(
-      `[PYTANIE ${round.qIndex + 1}/${round.totalQuestions}] ` +
+      `[PYTANIE ${round.qIndex + 1}/${round.totalQuestions} | ${round.questionType}${round.scored ? '' : '/opinia'}] ` +
         `Wysłane: ${round.sent}/${joinedCount} | ` +
         `Locked: ${round.locked} | Odrzucone: ${round.rejected} | ` +
-        `Poprawne: ${round.correct} (${correctPct}%) | ` +
+        `${outcomeSegment} | ` +
         `ACK p50/p95/max: ${fmtMs(stats.p50)} / ${fmtMs(stats.p95)} / ${fmtMs(stats.max)} | ` +
         `Fan-out: ${fmtMs(fanOutMs)}`
     );
@@ -300,6 +408,9 @@ async function main() {
     console.log('============================================================');
     console.log(`Serwer:             ${opts.url} (transport: ${transports.join(',')})`);
     console.log(`PIN pokoju:         ${activePin}`);
+    if (detectedSessionMode) {
+      console.log(`Tryb sesji:         ${detectedSessionMode}`);
+    }
     console.log(`Gracze docelowi:    ${opts.players}`);
     console.log(`Dołączono (LOBBY):  ${joinedCount}/${opts.players}`);
     console.log(`Błędy połączenia:   ${connectErrors}`);
@@ -324,15 +435,19 @@ async function main() {
         `p50=${fmtMs(ansStats.p50)} p95=${fmtMs(ansStats.p95)} p99=${fmtMs(ansStats.p99)} max=${fmtMs(ansStats.max)}`
     );
     if (podiumResults.length > 0) {
-      const top = [...podiumResults]
-        .sort((a, b) => (a.rank ?? 999999) - (b.rank ?? 999999) || b.score - a.score)
-        .slice(0, 5);
       console.log(
-        `Fan-out PODIUM:     ${fmtMs(podiumFanOut)} (odebrano: ${podiumResults.length}/${joinedCount})`
+        `Fan-out KONIEC:     ${fmtMs(podiumFanOut)} (odebrano: ${podiumResults.length}/${joinedCount})`
       );
-      console.log('Top 5 symulowanych graczy:');
-      for (const p of top) {
-        console.log(`  #${p.rank ?? '?'} ${p.nickname} — ${p.score} pkt`);
+      if (detectedHasScored && detectedSessionMode !== 'opinion') {
+        const top = [...podiumResults]
+          .sort((a, b) => (a.rank ?? 999999) - (b.rank ?? 999999) || b.score - a.score)
+          .slice(0, 5);
+        console.log('Top 5 symulowanych graczy:');
+        for (const p of top) {
+          console.log(`  #${p.rank ?? '?'} ${p.nickname} — ${p.score} pkt`);
+        }
+      } else {
+        console.log('Sesja niepunktowana (tryb opinii) — pominięto ranking punktowy.');
       }
     }
     console.log('============================================================\n');
@@ -391,8 +506,9 @@ async function main() {
             return;
           }
           activePin = res.pin;
+          detectedSessionMode = res.quiz?.mode || 'quiz';
           console.log(
-            `[HOST] Utworzono pokój PIN=${activePin} (${res.quiz?.title}, pytań: ${res.quiz?.questions?.length})`
+            `[HOST] Utworzono pokój PIN=${activePin} (${res.quiz?.title}, tryb: ${detectedSessionMode}, pytań: ${res.quiz?.questions?.length})`
           );
           resolve();
         });
@@ -479,29 +595,49 @@ async function main() {
         }
       });
 
-      socket.on('player_question_preview', ({ qIndex, totalQuestions, previewDuration }) => {
-        clearAnswerTimer();
-        flushAllPendingRounds();
-        const key = `preview:${qIndex}`;
-        if (lastLoggedPhase !== key) {
-          lastLoggedPhase = key;
-          console.log(
-            `[PYTANIE ${qIndex + 1}/${totalQuestions}] Podgląd pytania (${previewDuration}s)...`
-          );
+      socket.on(
+        'player_question_preview',
+        ({ qIndex, totalQuestions, previewDuration, questionType = 'abcd', scored = true }) => {
+          clearAnswerTimer();
+          flushAllPendingRounds();
+          const key = `preview:${qIndex}`;
+          if (lastLoggedPhase !== key) {
+            lastLoggedPhase = key;
+            console.log(
+              `[PYTANIE ${qIndex + 1}/${totalQuestions}] Podgląd pytania (${previewDuration}s, typ: ${questionType}${scored ? '' : '/opinia'})...`
+            );
+          }
+          getRound(qIndex, totalQuestions, questionType, scored);
         }
-        getRound(qIndex, totalQuestions);
-      });
+      );
 
-      socket.on('player_question_start', ({ qIndex, optionsCount, timeLimit }) => {
+      socket.on('player_question_start', (qData) => {
+        const {
+          qIndex,
+          questionType = 'abcd',
+          scored = true,
+          optionsCount,
+          sliderMin,
+          sliderMax,
+          sliderStep,
+          maxLength,
+          timeLimit,
+        } = qData;
         clearAnswerTimer();
         currentQIndex = qIndex;
-        const round = getRound(qIndex);
+        const round = getRound(qIndex, '?', questionType, scored);
 
         const key = `start:${qIndex}`;
         if (lastLoggedPhase !== key) {
           lastLoggedPhase = key;
+          let details = `opcji: ${optionsCount ?? 4}`;
+          if (questionType === 'slider') {
+            details = `zakres: ${sliderMin}..${sliderMax}, krok: ${sliderStep}`;
+          } else if (questionType === 'word_cloud') {
+            details = `maks. znaków: ${maxLength ?? 32}`;
+          }
           console.log(
-            `[PYTANIE ${qIndex + 1}/${round.totalQuestions}] Start odpowiedzi (limit: ${timeLimit}s, opcji: ${optionsCount})`
+            `[PYTANIE ${qIndex + 1}/${round.totalQuestions}] Start (${questionType}${scored ? '' : '/opinia'}, limit: ${timeLimit}s, ${details})`
           );
         }
 
@@ -517,7 +653,7 @@ async function main() {
           opts.maxDelay !== null ? opts.maxDelay : defaultMax;
         const span = Math.max(0, effectiveMax - opts.minDelay);
         const reactionMs = Math.floor(opts.minDelay + Math.random() * span);
-        const answerIndex = Math.floor(Math.random() * Math.max(1, optionsCount));
+        const answerPayload = buildAnswerPayload(qData, opts.words);
 
         pendingAnswerTimer = setTimeout(() => {
           pendingAnswerTimer = null;
@@ -528,7 +664,7 @@ async function main() {
           socket.emit('submit_answer', {
             pin: activePin,
             qIndex,
-            answerIndex,
+            ...answerPayload,
           });
         }, reactionMs);
       });
@@ -556,15 +692,22 @@ async function main() {
         }
       });
 
-      socket.on('player_question_end', ({ isCorrect }) => {
+      socket.on('player_question_end', ({ isCorrect, submitted, scored, questionType, sessionMode }) => {
         clearAnswerTimer();
+        if (sessionMode) detectedSessionMode = sessionMode;
         if (currentQIndex === null) return;
-        const round = getRound(currentQIndex);
+        const round = getRound(
+          currentQIndex,
+          '?',
+          questionType || null,
+          scored !== undefined ? scored : null
+        );
         const now = performance.now();
         if (round.firstEndAt === null) round.firstEndAt = now;
         round.lastEndAt = now;
         round.ended++;
         if (isCorrect) round.correct++;
+        if (submitted) round.submitted++;
 
         if (round.ended >= activeConnected) {
           printRoundSummary(round);
@@ -573,8 +716,10 @@ async function main() {
         }
       });
 
-      socket.on('player_podium', ({ score, rank }) => {
+      socket.on('player_podium', ({ score, rank, sessionMode, hasScoredQuestions }) => {
         clearAnswerTimer();
+        if (sessionMode) detectedSessionMode = sessionMode;
+        if (hasScoredQuestions !== undefined) detectedHasScored = hasScoredQuestions;
         if (podiumFirstAt === null) {
           podiumFirstAt = performance.now();
         }

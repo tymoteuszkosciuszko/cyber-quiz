@@ -8,8 +8,8 @@
 
 ## zmiany 2
 - [x] możliwość zmiany kolejności pytań w edytorze
-- [ ] trzy tryby: quiz (pytania punktowane) [Q], opinie (pytania niepunktowane, ankiety, komentarze, chmury słów itp.) [O], tryb mieszany [M]
-- [ ] formy pytań:
+- [x] trzy tryby: quiz (pytania punktowane) [Q], opinie (pytania niepunktowane, ankiety, komentarze, chmury słów itp.) [O], tryb mieszany [M]
+- [x] formy pytań:
     - pytanie ABCD [Q, M]
     - slider (podaj wartość w przedziale) [Q, O, M]
     - chmura słów (wpisz hasło) [O, M]
