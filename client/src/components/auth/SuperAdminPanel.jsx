@@ -312,7 +312,7 @@ export function SuperAdminPanel({ onBack }) {
                             {u.username}
                           </span>
                           <Badge variant={isSuper ? 'warning' : 'info'}>
-                            {isSuper ? 'Superadmin (jedyny)' : 'Admin'}
+                            {isSuper ? 'Superadmin' : 'Admin'}
                           </Badge>
                           <Badge variant={u.isActive ? 'default' : 'danger'}>
                             {u.isActive ? 'Aktywne' : 'Dezaktywowane'}
