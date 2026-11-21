@@ -64,20 +64,37 @@ export function clearSessionCookie(res) {
   });
 }
 
-export async function createSession(redis, user, meta = {}) {
+export async function createSession(
+  redis,
+  user,
+  meta = {},
+  {
+    mfaVerified = true,
+    mfaStage = null,
+    ttlOverrideSeconds = null,
+  } = {}
+) {
   const sid = generateSessionId();
   const sidHash = hashSessionId(sid);
   const now = Date.now();
-  const idleTtl = getIdleTtlForRole(user.role);
-  const absoluteExpiresAt = now + ABSOLUTE_TTL * 1000;
+  const effectiveTtl =
+    ttlOverrideSeconds && ttlOverrideSeconds > 0
+      ? Math.floor(ttlOverrideSeconds)
+      : getIdleTtlForRole(user.role);
+  const absoluteTtl =
+    ttlOverrideSeconds && ttlOverrideSeconds > 0
+      ? Math.floor(ttlOverrideSeconds)
+      : ABSOLUTE_TTL;
+  const absoluteExpiresAt = now + absoluteTtl * 1000;
 
   const session = {
     userId: user.id,
     username: user.username,
     role: user.role,
     mustChangePassword: Boolean(user.must_change_password ?? user.mustChangePassword),
-    // Punkt zaczepienia pod przyszłe wdrożenie WebAuthn/YubiKey (Etap 2)
-    mfaVerified: true,
+    mfaVerified: Boolean(mfaVerified),
+    mfaStage: mfaVerified ? null : mfaStage || 'VERIFY',
+    mfaAttempts: 0,
     csrfToken: generateCsrfToken(),
     createdAt: now,
     lastSeenAt: now,
@@ -86,11 +103,42 @@ export async function createSession(redis, user, meta = {}) {
     ua: meta.userAgent ? String(meta.userAgent).slice(0, 200) : null,
   };
 
-  await redis.set(sessionKey(sidHash), JSON.stringify(session), 'EX', idleTtl);
+  await redis.set(sessionKey(sidHash), JSON.stringify(session), 'EX', effectiveTtl);
   await redis.sadd(userSessionsKey(user.id), sidHash);
   await redis.expire(userSessionsKey(user.id), ABSOLUTE_TTL + 60);
 
-  return { sid, sidHash, session, maxAgeSeconds: ABSOLUTE_TTL };
+  return { sid, sidHash, session, maxAgeSeconds: absoluteTtl };
+}
+
+export async function recordSessionMfaFailure(redis, sidHash, maxAttempts = 5) {
+  if (!sidHash) return { attempts: maxAttempts, destroyed: true };
+  const raw = await redis.get(sessionKey(sidHash));
+  if (!raw) return { attempts: maxAttempts, destroyed: true };
+
+  let session;
+  try {
+    session = JSON.parse(raw);
+  } catch {
+    await redis.del(sessionKey(sidHash));
+    return { attempts: maxAttempts, destroyed: true };
+  }
+
+  const attempts = (Number(session.mfaAttempts) || 0) + 1;
+  if (attempts >= maxAttempts) {
+    await redis.del(sessionKey(sidHash));
+    if (session.userId) {
+      await redis.srem(userSessionsKey(session.userId), sidHash);
+    }
+    return { attempts, destroyed: true };
+  }
+
+  session.mfaAttempts = attempts;
+  const remainingSec = Math.max(
+    1,
+    Math.floor(((session.absoluteExpiresAt || Date.now()) - Date.now()) / 1000)
+  );
+  await redis.set(sessionKey(sidHash), JSON.stringify(session), 'EX', remainingSec);
+  return { attempts, destroyed: false };
 }
 
 export async function getSessionByHash(redis, sidHash, { touch = true } = {}) {
@@ -115,7 +163,7 @@ export async function getSessionByHash(redis, sidHash, { touch = true } = {}) {
     return null;
   }
 
-  if (touch) {
+  if (touch && session.mfaVerified !== false) {
     const remainingAbsSec = Math.max(
       1,
       Math.floor((session.absoluteExpiresAt - now) / 1000)
@@ -143,11 +191,11 @@ export async function destroySession(redis, sid) {
   }
 }
 
-export async function regenerateSession(redis, oldSid, user, meta = {}) {
+export async function regenerateSession(redis, oldSid, user, meta = {}, options = {}) {
   if (oldSid) {
     await destroySession(redis, oldSid);
   }
-  return createSession(redis, user, meta);
+  return createSession(redis, user, meta, options);
 }
 
 export async function revokeAllUserSessions(redis, userId, exceptSidHash = null) {

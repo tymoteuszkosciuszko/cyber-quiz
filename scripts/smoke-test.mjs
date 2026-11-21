@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -126,6 +127,179 @@ class AuthClient {
       body: { username, password },
       csrf: false,
     });
+  }
+}
+
+// =========================================================================
+// Programowy wirtualny autentykator FIDO2 (ES256 / COSE) do testów WebAuthn
+// =========================================================================
+function cborEncodeUint(majorType, value) {
+  const mt = majorType << 5;
+  if (value < 24) return Buffer.from([mt | value]);
+  if (value < 256) return Buffer.from([mt | 24, value]);
+  if (value < 65536) {
+    const b = Buffer.alloc(3);
+    b[0] = mt | 25;
+    b.writeUInt16BE(value, 1);
+    return b;
+  }
+  const b = Buffer.alloc(5);
+  b[0] = mt | 26;
+  b.writeUInt32BE(value, 1);
+  return b;
+}
+
+function cborEncodeInt(n) {
+  if (n >= 0) return cborEncodeUint(0, n);
+  return cborEncodeUint(1, -1 - n);
+}
+
+function cborEncodeBytes(buf) {
+  return Buffer.concat([cborEncodeUint(2, buf.length), buf]);
+}
+
+function cborEncodeText(str) {
+  const buf = Buffer.from(str, 'utf8');
+  return Buffer.concat([cborEncodeUint(3, buf.length), buf]);
+}
+
+function cborEncodeMap(entries) {
+  return Buffer.concat([
+    cborEncodeUint(5, entries.length),
+    ...entries.flatMap(([k, v]) => [k, v]),
+  ]);
+}
+
+class VirtualFido2Key {
+  constructor({ transports = ['usb', 'nfc'], initialCounter = 1 } = {}) {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+      namedCurve: 'P-256',
+    });
+    this.publicKey = publicKey;
+    this.privateKey = privateKey;
+    const jwk = publicKey.export({ format: 'jwk' });
+    this.x = Buffer.from(jwk.x, 'base64url');
+    this.y = Buffer.from(jwk.y, 'base64url');
+    this.credentialIdBuf = crypto.randomBytes(32);
+    this.credentialId = this.credentialIdBuf.toString('base64url');
+    this.transports = transports;
+    this.counter = initialCounter;
+    this.aaguid = Buffer.from('f8a011f38c0a4d15800617111f9edc7d', 'hex');
+  }
+
+  getCosePublicKey() {
+    return cborEncodeMap([
+      [cborEncodeInt(1), cborEncodeInt(2)], // kty: EC2
+      [cborEncodeInt(3), cborEncodeInt(-7)], // alg: ES256
+      [cborEncodeInt(-1), cborEncodeInt(1)], // crv: P-256
+      [cborEncodeInt(-2), cborEncodeBytes(this.x)],
+      [cborEncodeInt(-3), cborEncodeBytes(this.y)],
+    ]);
+  }
+
+  createRegistrationResponse(
+    options,
+    { origin, rpId = options.rp.id, uv = true, up = true } = {}
+  ) {
+    const clientDataJSON = Buffer.from(
+      JSON.stringify({
+        type: 'webauthn.create',
+        challenge: options.challenge,
+        origin,
+        crossOrigin: false,
+      }),
+      'utf8'
+    );
+
+    const rpIdHash = crypto.createHash('sha256').update(rpId).digest();
+    const flags = (up ? 0x01 : 0) | (uv ? 0x04 : 0) | 0x40; // UP | UV | AT
+    const signCountBuf = Buffer.alloc(4);
+    signCountBuf.writeUInt32BE(this.counter, 0);
+    const credIdLenBuf = Buffer.alloc(2);
+    credIdLenBuf.writeUInt16BE(this.credentialIdBuf.length, 0);
+
+    const authData = Buffer.concat([
+      rpIdHash,
+      Buffer.from([flags]),
+      signCountBuf,
+      this.aaguid,
+      credIdLenBuf,
+      this.credentialIdBuf,
+      this.getCosePublicKey(),
+    ]);
+
+    const attestationObject = cborEncodeMap([
+      [cborEncodeText('fmt'), cborEncodeText('none')],
+      [cborEncodeText('attStmt'), cborEncodeMap([])],
+      [cborEncodeText('authData'), cborEncodeBytes(authData)],
+    ]);
+
+    return {
+      id: this.credentialId,
+      rawId: this.credentialId,
+      type: 'public-key',
+      response: {
+        clientDataJSON: clientDataJSON.toString('base64url'),
+        attestationObject: attestationObject.toString('base64url'),
+        transports: this.transports,
+      },
+      clientExtensionResults: {},
+    };
+  }
+
+  createAuthenticationResponse(
+    options,
+    {
+      origin,
+      rpId = options.rpId,
+      uv = true,
+      up = true,
+      counterOverride = null,
+    } = {}
+  ) {
+    const nextCounter =
+      counterOverride !== null ? counterOverride : ++this.counter;
+    const clientDataJSON = Buffer.from(
+      JSON.stringify({
+        type: 'webauthn.get',
+        challenge: options.challenge,
+        origin,
+        crossOrigin: false,
+      }),
+      'utf8'
+    );
+
+    const rpIdHash = crypto.createHash('sha256').update(rpId).digest();
+    const flags = (up ? 0x01 : 0) | (uv ? 0x04 : 0);
+    const signCountBuf = Buffer.alloc(4);
+    signCountBuf.writeUInt32BE(nextCounter, 0);
+    const authData = Buffer.concat([
+      rpIdHash,
+      Buffer.from([flags]),
+      signCountBuf,
+    ]);
+
+    const clientDataHash = crypto
+      .createHash('sha256')
+      .update(clientDataJSON)
+      .digest();
+    const signature = crypto.sign(
+      'sha256',
+      Buffer.concat([authData, clientDataHash]),
+      this.privateKey
+    );
+
+    return {
+      id: this.credentialId,
+      rawId: this.credentialId,
+      type: 'public-key',
+      response: {
+        clientDataJSON: clientDataJSON.toString('base64url'),
+        authenticatorData: authData.toString('base64url'),
+        signature: signature.toString('base64url'),
+      },
+      clientExtensionResults: {},
+    };
   }
 }
 
@@ -285,8 +459,13 @@ async function stopServer(child) {
   });
 }
 
-async function runTests(baseUrl, { skipStatic, superadminUser, superadminPass }) {
+async function runTests(
+  baseUrl,
+  { skipStatic, superadminUser, superadminPass, createdTempSuperadmin = false }
+) {
   let passed = 0;
+  const parsedBase = new URL(baseUrl);
+  const webauthnOrigin = `http://localhost:${parsedBase.port || 3001}`;
 
   const step = async (name, fn) => {
     const start = Date.now();
@@ -345,9 +524,13 @@ async function runTests(baseUrl, { skipStatic, superadminUser, superadminPass })
     }
   });
 
-  // 4. Logowanie superadmina, flagi cookie, ochrona CSRF
+  // 4. Logowanie superadmina + obowiązkowy enrollment MFA (FIDO2 PIN) + wielokluczowość + testy negatywne
   const superClient = new AuthClient(baseUrl);
-  await step('Logowanie superadmina + weryfikacja cookie HttpOnly + blokada bez CSRF', async () => {
+  const yubiKey1 = new VirtualFido2Key({ transports: ['usb', 'nfc'], initialCounter: 5 });
+  const touchIdKey2 = new VirtualFido2Key({ transports: ['internal'], initialCounter: 0 });
+  const createdCredIds = [];
+
+  await step('Logowanie superadmina + wymuszony enrollment MFA (UV=1) + ochrona sesji pre-MFA i CSRF', async () => {
     const bad = await superClient.login(superadminUser, 'WrongPassword_123456!');
     assert.equal(bad.res.status, 401);
     assert.equal(bad.data.error, 'INVALID_CREDENTIALS');
@@ -360,6 +543,130 @@ async function runTests(baseUrl, { skipStatic, superadminUser, superadminPass })
     assert.match(superClient.lastRawSetCookie, /SameSite=Lax/i);
     assert.ok(superClient.csrfToken);
 
+    // W domyślnym trybie required bez kluczy -> MFA_ENROLLMENT_REQUIRED
+    assert.equal(
+      ok.data.status,
+      'MFA_ENROLLMENT_REQUIRED',
+      'Nowy superadmin bez kluczy musi przejść obowiązkowy enrollment MFA'
+    );
+
+    // Sesja pre-MFA nie ma dostępu do REST API ani Socket.IO
+    const preMfaQuiz = await superClient.request('/api/quizzes');
+    assert.equal(preMfaQuiz.res.status, 403);
+    assert.equal(preMfaQuiz.data.error, 'MFA_ENROLLMENT_REQUIRED');
+
+    const preMfaUsers = await superClient.request('/api/admin/users');
+    assert.equal(preMfaUsers.res.status, 403);
+
+    const preMfaSocket = await connectSocket(baseUrl, superClient.cookie);
+    try {
+      const sockRes = await emitWithAck(preMfaSocket, 'host_create_room', {
+        quizId: 'default-cyber-quiz',
+      });
+      assert.equal(sockRes.error, 'UNAUTHORIZED');
+    } finally {
+      preMfaSocket.disconnect();
+    }
+
+    // Rejestracja BEZ flagi UV (brak PIN-u FIDO2) musi zostać odrzucona
+    const regOptBad = await superClient.request('/api/auth/mfa/register/options', {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(regOptBad.res.status, 200);
+    assert.equal(
+      regOptBad.data.options.authenticatorSelection.userVerification,
+      'required'
+    );
+    assert.equal(
+      regOptBad.data.options.authenticatorSelection.authenticatorAttachment,
+      undefined,
+      'Brak ograniczenia authenticatorAttachment (YubiKey + inne klucze + Touch ID)'
+    );
+
+    const attNoUv = yubiKey1.createRegistrationResponse(regOptBad.data.options, {
+      origin: webauthnOrigin,
+      uv: false,
+    });
+    const regFailUv = await superClient.request('/api/auth/mfa/register/verify', {
+      method: 'POST',
+      body: { name: 'Bez PIN', response: attNoUv },
+    });
+    assert.equal(regFailUv.res.status, 400);
+
+    // Poprawna rejestracja 1. klucza (YubiKey z UV=1) kończy enrollment i rotuje sesję
+    const preEnrollCookie = superClient.cookie;
+    const regOpt1 = await superClient.request('/api/auth/mfa/register/options', {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(regOpt1.res.status, 200);
+    const att1 = yubiKey1.createRegistrationResponse(regOpt1.data.options, {
+      origin: webauthnOrigin,
+      uv: true,
+    });
+    const regOk1 = await superClient.request('/api/auth/mfa/register/verify', {
+      method: 'POST',
+      body: { name: 'YubiKey 5C Smoke', response: att1 },
+    });
+    assert.equal(regOk1.res.status, 201);
+    assert.equal(regOk1.data.status, 'AUTHENTICATED');
+    assert.notEqual(superClient.cookie, preEnrollCookie, 'Sesja musi ulec rotacji po enrollment');
+    assert.ok(regOk1.data.credential?.id);
+    createdCredIds.push(regOk1.data.credential.id);
+
+    // Stare ciasteczko pre-MFA przestaje działać
+    const staleRes = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Cookie: preEnrollCookie },
+    });
+    assert.equal(staleRes.status, 401);
+
+    // Anti-lockout: nie można usunąć ostatniego klucza w trybie required
+    const delLast = await superClient.request(
+      `/api/auth/mfa/credentials/${regOk1.data.credential.id}`,
+      {
+        method: 'DELETE',
+        body: { currentPassword: superadminPass },
+      }
+    );
+    assert.equal(delLast.res.status, 409);
+    assert.equal(delLast.data.error, 'LAST_MFA_KEY_PROTECTED');
+
+    // Dodanie 2. klucza (np. Touch ID) wymaga poprawnego aktualnego hasła (re-auth)
+    const regOptNoPwd = await superClient.request('/api/auth/mfa/register/options', {
+      method: 'POST',
+      body: { currentPassword: 'WrongPassword_123456!' },
+    });
+    assert.equal(regOptNoPwd.res.status, 400);
+
+    const regOpt2 = await superClient.request('/api/auth/mfa/register/options', {
+      method: 'POST',
+      body: { currentPassword: superadminPass },
+    });
+    assert.equal(regOpt2.res.status, 200);
+    const att2 = touchIdKey2.createRegistrationResponse(regOpt2.data.options, {
+      origin: webauthnOrigin,
+      uv: true,
+    });
+    const regOk2 = await superClient.request('/api/auth/mfa/register/verify', {
+      method: 'POST',
+      body: { name: 'Touch ID Smoke', response: att2 },
+    });
+    assert.equal(regOk2.res.status, 201);
+    assert.equal(regOk2.data.mfaCredentialsCount, 2);
+    createdCredIds.push(regOk2.data.credential.id);
+
+    // Zmiana nazwy 2. klucza
+    const renamed = await superClient.request(
+      `/api/auth/mfa/credentials/${regOk2.data.credential.id}`,
+      {
+        method: 'PATCH',
+        body: { name: 'MacBook Touch ID' },
+      }
+    );
+    assert.equal(renamed.res.status, 200);
+    assert.equal(renamed.data.credential.name, 'MacBook Touch ID');
+
     // Mutacja bez CSRF tokena -> 403
     const noCsrf = await superClient.request('/api/quizzes', {
       method: 'POST',
@@ -368,6 +675,131 @@ async function runTests(baseUrl, { skipStatic, superadminUser, superadminPass })
     });
     assert.equal(noCsrf.res.status, 403);
     assert.equal(noCsrf.data.error, 'INVALID_CSRF_TOKEN');
+  });
+
+  await step('MFA krok 2 (YubiKey + Touch ID), testy negatywne (UV=0, replay, zły origin, counter anomaly)', async () => {
+    // Logowanie z istniejącymi kluczami -> MFA_REQUIRED
+    const mfaClient = new AuthClient(baseUrl);
+    const step1 = await mfaClient.login(superadminUser, superadminPass);
+    assert.equal(step1.res.status, 200);
+    assert.equal(step1.data.status, 'MFA_REQUIRED');
+
+    const blockedPre = await mfaClient.request('/api/quizzes');
+    assert.equal(blockedPre.res.status, 403);
+    assert.equal(blockedPre.data.error, 'MFA_REQUIRED');
+
+    // Test negatywny 1: brak UV (UV=0) -> 401
+    const optNoUv = await mfaClient.request('/api/auth/mfa/login/options', {
+      method: 'POST',
+    });
+    assert.equal(optNoUv.res.status, 200);
+    assert.equal(optNoUv.data.options.userVerification, 'required');
+    const respNoUv = yubiKey1.createAuthenticationResponse(optNoUv.data.options, {
+      origin: webauthnOrigin,
+      uv: false,
+    });
+    const failNoUv = await mfaClient.request('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: { response: respNoUv },
+    });
+    assert.equal(failNoUv.res.status, 401);
+
+    // Test negatywny 2: zły origin (phishing) -> 401
+    const optPhish = await mfaClient.request('/api/auth/mfa/login/options', {
+      method: 'POST',
+    });
+    const respPhish = yubiKey1.createAuthenticationResponse(optPhish.data.options, {
+      origin: 'https://evil-phishing.example',
+      uv: true,
+    });
+    const failPhish = await mfaClient.request('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: { response: respPhish },
+    });
+    assert.equal(failPhish.res.status, 401);
+
+    // Test negatywny 3: regresja licznika (klonowany klucz: counter <= 5) -> 401 + AUTH_MFA_COUNTER_ANOMALY
+    const optClone = await mfaClient.request('/api/auth/mfa/login/options', {
+      method: 'POST',
+    });
+    const respClone = yubiKey1.createAuthenticationResponse(optClone.data.options, {
+      origin: webauthnOrigin,
+      uv: true,
+      counterOverride: 3,
+    });
+    const failClone = await mfaClient.request('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: { response: respClone },
+    });
+    assert.equal(failClone.res.status, 401);
+    assert.equal(failClone.data.error, 'MFA_COUNTER_ANOMALY');
+
+    // Poprawne logowanie 1. kluczem (YubiKey, UV=1, counter > 5) + test replay
+    const preMfaCookie = mfaClient.cookie;
+    const optOk = await mfaClient.request('/api/auth/mfa/login/options', {
+      method: 'POST',
+    });
+    const respOk = yubiKey1.createAuthenticationResponse(optOk.data.options, {
+      origin: webauthnOrigin,
+      uv: true,
+      counterOverride: 10,
+    });
+    yubiKey1.counter = 10;
+
+    const verOk = await mfaClient.request('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: { response: respOk },
+    });
+    assert.equal(verOk.res.status, 200);
+    assert.equal(verOk.data.status, 'AUTHENTICATED');
+    assert.notEqual(mfaClient.cookie, preMfaCookie);
+
+    // Replay: próba ponownego użycia tej samej odpowiedzi WebAuthn z nową sesją pre-MFA
+    const replayClient = new AuthClient(baseUrl);
+    await replayClient.login(superadminUser, superadminPass);
+    await replayClient.request('/api/auth/mfa/login/options', { method: 'POST' });
+    const replayRes = await replayClient.request('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: { response: respOk },
+    });
+    assert.equal(replayRes.res.status, 401);
+
+    // Poprawne logowanie 2. kluczem (Touch ID, counter=0 -> 0 dozwolone wg specyfikacji WebAuthn)
+    const optTouch = await replayClient.request('/api/auth/mfa/login/options', {
+      method: 'POST',
+    });
+    const respTouch = touchIdKey2.createAuthenticationResponse(
+      optTouch.data.options,
+      { origin: webauthnOrigin, uv: true, counterOverride: 0 }
+    );
+    const verTouch = await replayClient.request('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: { response: respTouch },
+    });
+    assert.equal(verTouch.res.status, 200);
+    assert.equal(verTouch.data.status, 'AUTHENTICATED');
+
+    // Weryfikacja wpisu AUTH_MFA_COUNTER_ANOMALY w audit_logs
+    const mfaLogs = await superClient.request(
+      '/api/admin/audit-logs?eventType=AUTH_MFA_COUNTER_ANOMALY'
+    );
+    assert.equal(mfaLogs.res.status, 200);
+    assert.ok(mfaLogs.data.items.length >= 1, 'Brak wpisu AUTH_MFA_COUNTER_ANOMALY');
+
+    // Usunięcie 2. klucza (zostaje 1. klucz) działa z poprawnym hasłem
+    const delSecond = await superClient.request(
+      `/api/auth/mfa/credentials/${createdCredIds[1]}`,
+      {
+        method: 'DELETE',
+        body: { currentPassword: superadminPass },
+      }
+    );
+    assert.equal(delSecond.res.status, 200);
+    assert.equal(delSecond.data.remainingCredentials, 1);
+
+    // Zamykamy sesję pomocniczą
+    await mfaClient.request('/api/auth/logout', { method: 'POST' });
+    await replayClient.request('/api/auth/logout', { method: 'POST' });
   });
 
   // 5. Inwariant pojedynczego superadmina + tworzenie 2 kont adminów i wymuszona zmiana hasła
@@ -443,9 +875,11 @@ async function runTests(baseUrl, { skipStatic, superadminUser, superadminPass })
       assert.equal(changedA.data.status, 'AUTHENTICATED');
       assert.notEqual(adminAClient.cookie, oldCookieA, 'ID sesji musi ulec rotacji');
 
-      // Zwykły admin nie ma dostępu do /api/admin/users
+      // Zwykły admin nie ma dostępu do /api/admin/users ani /api/auth/mfa/credentials
       const adminDenied = await adminAClient.request('/api/admin/users');
       assert.equal(adminDenied.res.status, 403);
+      const adminMfaDenied = await adminAClient.request('/api/auth/mfa/credentials');
+      assert.equal(adminMfaDenied.res.status, 403);
 
       // Logowanie i zmiana hasła dla Admin B
       const loginB = await adminBClient.login(
@@ -730,6 +1164,37 @@ async function runTests(baseUrl, { skipStatic, superadminUser, superadminPass })
     }
   }
 
+  if (createdTempSuperadmin) {
+    await step('Awaryjne CLI reset-superadmin.mjs --list-mfa oraz --reset-mfa', async () => {
+      const resetScript = path.join(
+        ROOT_DIR,
+        'server',
+        'scripts',
+        'reset-superadmin.mjs'
+      );
+      const listOut = execFileSync(process.execPath, [resetScript, '--list-mfa'], {
+        cwd: path.join(ROOT_DIR, 'server'),
+        encoding: 'utf8',
+      });
+      assert.match(listOut, /YubiKey 5C Smoke/);
+
+      const resetOut = execFileSync(process.execPath, [resetScript, '--reset-mfa'], {
+        cwd: path.join(ROOT_DIR, 'server'),
+        encoding: 'utf8',
+      });
+      assert.match(resetOut, /usunięto kluczy MFA: 1/);
+
+      // Stara sesja superadmina musi być unieważniona
+      const afterReset = await superClient.request('/api/auth/me');
+      assert.equal(afterReset.res.status, 401);
+
+      // Ponowne logowanie znów wymusza enrollment MFA
+      const relogin = await superClient.login(superadminUser, superadminPass);
+      assert.equal(relogin.res.status, 200);
+      assert.equal(relogin.data.status, 'MFA_ENROLLMENT_REQUIRED');
+    });
+  }
+
   console.log(`\nWszystkie testy (${passed}/${passed}) zakończone sukcesem.\n`);
 }
 
@@ -749,7 +1214,7 @@ async function main() {
       serverProc = started.child;
       baseUrl = started.baseUrl;
     }
-    await runTests(baseUrl, opts);
+    await runTests(baseUrl, { ...opts, createdTempSuperadmin });
   } finally {
     await stopServer(serverProc);
     if (createdTempSuperadmin) {

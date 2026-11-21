@@ -15,6 +15,8 @@ import { AdminMenu } from './components/AdminMenu';
 import { QuizEditor } from './components/QuizEditor';
 import { LoginView } from './components/auth/LoginView';
 import { ForcePasswordChangeView } from './components/auth/ForcePasswordChangeView';
+import { MfaVerifyView } from './components/auth/MfaVerifyView';
+import { MfaEnrollmentView } from './components/auth/MfaEnrollmentView';
 import { AccountSecurityModal } from './components/auth/AccountSecurityModal';
 import { SuperAdminPanel } from './components/auth/SuperAdminPanel';
 import { isValidImageValue } from './utils/imageUtils';
@@ -50,6 +52,7 @@ function MainApp() {
   // ─── STAN UWIERZYTELNIANIA (tylko /game-admin) ───
   const [authLoading, setAuthLoading] = useState(isAdminRoute);
   const [authUser, setAuthUser] = useState(null);
+  const [authStatus, setAuthStatus] = useState(null); // MFA_REQUIRED | MFA_ENROLLMENT_REQUIRED | MUST_CHANGE_PASSWORD | AUTHENTICATED
   const [showSecurityModal, setShowSecurityModal] = useState(false);
 
   // ─── TRYB APLIKACJI ───
@@ -112,6 +115,7 @@ function MainApp() {
   const clearAuthState = useCallback(() => {
     setCsrfToken(null);
     setAuthUser(null);
+    setAuthStatus(null);
     setShowSecurityModal(false);
     setQuizzes([]);
     setMode('MENU');
@@ -136,14 +140,17 @@ function MainApp() {
         if (res.ok && data.user) {
           setCsrfToken(data.csrfToken);
           setAuthUser(data.user);
+          setAuthStatus(data.status || 'AUTHENTICATED');
         } else {
           setCsrfToken(null);
           setAuthUser(null);
+          setAuthStatus(null);
         }
       } catch {
         if (!cancelled) {
           setCsrfToken(null);
           setAuthUser(null);
+          setAuthStatus(null);
         }
       } finally {
         if (!cancelled) setAuthLoading(false);
@@ -157,10 +164,17 @@ function MainApp() {
   }, [clearAuthState]);
 
   const handleAuthenticated = useCallback(
-    (user) => {
-      setAuthUser(user);
+    (payload) => {
+      const nextUser = payload?.user ?? payload;
+      const nextStatus =
+        payload?.status ||
+        (nextUser?.mustChangePassword ? 'MUST_CHANGE_PASSWORD' : 'AUTHENTICATED');
+      setAuthUser(nextUser);
+      setAuthStatus(nextStatus);
       setMode('MENU');
-      reconnectSocket();
+      if (nextStatus === 'AUTHENTICATED') {
+        reconnectSocket();
+      }
     },
     [reconnectSocket]
   );
@@ -179,7 +193,7 @@ function MainApp() {
   }, [clearAuthState]);
 
   const isFullyAuthenticatedAdmin =
-    isAdminRoute && Boolean(authUser) && !authUser.mustChangePassword;
+    isAdminRoute && Boolean(authUser) && authStatus === 'AUTHENTICATED';
 
   // ─── Pobieranie listy quizów (tylko zalogowany admin) ───
   const fetchQuizzes = useCallback(async () => {
@@ -967,13 +981,37 @@ function MainApp() {
           <LoginView onAuthenticated={handleAuthenticated} />
         )}
 
-        {isAdminRoute && !authLoading && authUser?.mustChangePassword && (
-          <ForcePasswordChangeView
+        {isAdminRoute && !authLoading && authUser && authStatus === 'MFA_REQUIRED' && (
+          <MfaVerifyView
             user={authUser}
-            onPasswordChanged={handleAuthenticated}
+            onAuthenticated={handleAuthenticated}
             onLogout={handleLogout}
+            onSessionExpired={clearAuthState}
           />
         )}
+
+        {isAdminRoute &&
+          !authLoading &&
+          authUser &&
+          authStatus === 'MFA_ENROLLMENT_REQUIRED' && (
+            <MfaEnrollmentView
+              user={authUser}
+              onCompleted={handleAuthenticated}
+              onLogout={handleLogout}
+              onSessionExpired={clearAuthState}
+            />
+          )}
+
+        {isAdminRoute &&
+          !authLoading &&
+          authUser &&
+          authStatus === 'MUST_CHANGE_PASSWORD' && (
+            <ForcePasswordChangeView
+              user={authUser}
+              onPasswordChanged={handleAuthenticated}
+              onLogout={handleLogout}
+            />
+          )}
 
         {isFullyAuthenticatedAdmin && mode === 'SUPERADMIN' && (
           <SuperAdminPanel onBack={() => setMode('MENU')} />
@@ -1057,13 +1095,19 @@ function MainApp() {
         )}
       </div>
 
-      {showSecurityModal && authUser && (
+      {showSecurityModal && authUser && isFullyAuthenticatedAdmin && (
         <AccountSecurityModal
           user={authUser}
           onClose={() => setShowSecurityModal(false)}
           onPasswordChanged={(updatedUser) => {
             setAuthUser(updatedUser);
+            setAuthStatus('AUTHENTICATED');
             reconnectSocket();
+          }}
+          onMfaCountChanged={(count) => {
+            setAuthUser((prev) =>
+              prev ? { ...prev, mfaCredentialsCount: count } : prev
+            );
           }}
           onLoggedOutAll={clearAuthState}
         />

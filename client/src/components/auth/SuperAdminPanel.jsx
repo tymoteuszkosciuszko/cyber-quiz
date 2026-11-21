@@ -320,6 +320,17 @@ export function SuperAdminPanel({ onBack }) {
                           {u.mustChangePassword && (
                             <Badge variant="purple">Hasło tymczasowe</Badge>
                           )}
+                          {isSuper && (
+                            <Badge
+                              variant={
+                                u.mfaCredentialsCount > 0 ? 'default' : 'danger'
+                              }
+                            >
+                              {u.mfaCredentialsCount > 0
+                                ? `MFA FIDO2 (${u.mfaCredentialsCount})`
+                                : 'MFA: brak kluczy'}
+                            </Badge>
+                          )}
                         </div>
                         <div className="text-xs text-foreground/75">
                           Własne quizy: <strong>{u.quizzesCount}</strong> •

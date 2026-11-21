@@ -71,16 +71,21 @@ Panel `/game-admin`, wszystkie endpointy `/api/*` oraz zdarzenia prowadzącego S
 - **Role:**
   - `superadmin` (twardy limit **jednego konta** wymuszony unikalnym indeksem częściowym w PostgreSQL): pełny dostęp + zakładka **Admini i Audyt** (tworzenie kont `admin` z jednorazowym hasłem tymczasowym, dezaktywacja z natychmiastowym odcięciem sesji, reset haseł, usuwanie, dziennik `audit_logs`).
   - `admin`: zarządzanie wyłącznie własnymi quizami (izolacja per użytkownik + możliwość uruchamiania i klonowania wbudowanych szablonów) oraz prowadzenie własnych sesji gry.
-- **Mechanizmy bezpieczeństwa:** hashowanie haseł **Argon2id**, polityka haseł min. 12 znaków (NFKC + lista słabych haseł), sesje serwerowe w Redisie (256-bitowe `sid` w ciasteczku `HttpOnly` / `Secure` / `SameSite=Lax` / prefiks `__Host-`), ochrona **CSRF** (`X-CSRF-Token` + weryfikacja `Origin`), progresywny lockout i rate-limiting IP, nagłówki `helmet` (CSP, HSTS, `nosniff`) oraz walidacja właściciela pokoju gry w Socket.IO.
+- **Mechanizmy bezpieczeństwa:** hashowanie haseł **Argon2id**, polityka haseł min. 12 znaków (NFKC + lista słabych haseł), obowiązkowe **MFA FIDO2 / WebAuthn** dla konta `superadmin` (wymuszony **FIDO2 PIN** / biometria, obsługa wielu kluczy: YubiKey, inne klucze sprzętowe oraz Touch ID / Windows Hello), sesje serwerowe w Redisie (256-bitowe `sid` w ciasteczku `HttpOnly` / `Secure` / `SameSite=Lax` / prefiks `__Host-`), ochrona **CSRF** (`X-CSRF-Token` + weryfikacja `Origin`), progresywny lockout i rate-limiting IP, nagłówki `helmet` (CSP, HSTS, `nosniff`) oraz walidacja właściciela pokoju gry w Socket.IO.
+- **MFA superadmina (YubiKey / FIDO2):** przy pierwszym logowaniu superadmin musi zarejestrować co najmniej jeden klucz bezpieczeństwa z FIDO2 PIN lub biometrią (zalecane dodanie co najmniej 2 kluczy, np. YubiKey + Touch ID / zapasowy YubiKey). WebAuthn wymaga bezpiecznego kontekstu (**HTTPS** na produkcji za SWAG lub **`http://localhost`** w trybie deweloperskim).
 - **Bootstrap na produkcji (Docker):**
   ```bash
   docker exec -it cyber-quiz node scripts/bootstrap-superadmin.mjs
   ```
-- **Zmiana loginu i/lub awaryjny reset hasła superadmina (SSH):**
+- **Zmiana loginu, awaryjny reset hasła i reset MFA superadmina (SSH):**
   ```bash
   docker exec -it cyber-quiz node scripts/reset-superadmin.mjs
-  # lub zmiana samego loginu:
+  # zmiana samego loginu:
   docker exec -it cyber-quiz node scripts/reset-superadmin.mjs --username nowy_login --keep-password
+  # podgląd zarejestrowanych kluczy MFA:
+  docker exec -it cyber-quiz node scripts/reset-superadmin.mjs --list-mfa
+  # awaryjny reset kluczy MFA (usuwa klucze, wylogowuje sesje i wymusza ponowną rejestrację przy logowaniu):
+  docker exec -it cyber-quiz node scripts/reset-superadmin.mjs --reset-mfa
   ```
 
 ## Wdrożenie produkcyjne (Docker + SWAG)
@@ -110,6 +115,11 @@ Przykładowa konfiguracja subdomeny znajduje się w [`deploy/swag/cyber-quiz.sub
 | `REDIS_PORT` | `6379` | Port serwera Redis |
 | `REDIS_PASSWORD` | *(brak)* | Opcjonalne hasło do Redisa |
 | `CORS_ORIGIN` | `*` | Dozwolone originy CORS (pojedynczy adres lub lista rozdzielona przecinkami) |
+| `WEBAUTHN_RP_NAME` | `Cyber Quiz` | Nazwa aplikacji wyświetlana przez przeglądarkę podczas weryfikacji WebAuthn |
+| `WEBAUTHN_RP_ID` | *(z `CORS_ORIGIN` / `localhost`)* | Domena RP dla WebAuthn (np. `quiz.twojadomena.pl`) |
+| `WEBAUTHN_ORIGIN` | *(z `CORS_ORIGIN`)* | Dozwolone originy HTTPS dla WebAuthn (rozdzielone przecinkami) |
+| `SUPERADMIN_MFA_ENFORCEMENT` | `required` | Tryb wymuszania MFA superadmina (`required` = obowiązkowa rejestracja przy 1. logowaniu, `optional` = opcjonalne do czasu dodania 1. klucza) |
+| `WEBAUTHN_USER_VERIFICATION` | `required` | Wymaganie weryfikacji użytkownika (FIDO2 PIN / biometria): `required` lub `preferred` |
 | `STATIC_DIR` | `../client/dist` | Katalog ze zbudowanym frontendem SPA (w Dockerze: `/app/public`) |
 | `VITE_BACKEND_URL` | *(auto)* | Zmienna czasu budowania Vite; domyślnie w dev `http://<hostname>:3001`, w prod `window.location.origin` |
 | `SWAG_NETWORK` | `swag` | Nazwa zewnętrznej sieci Docker dla reverse proxy w `docker-compose.prod.yml` |
