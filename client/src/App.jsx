@@ -93,7 +93,7 @@ function MainApp() {
     fetch(`${BACKEND_URL}/api/quizzes`)
       .then((r) => r.json())
       .then((data) => setQuizzes(data))
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -438,8 +438,8 @@ function MainApp() {
             const answers = Array.isArray(q.answers)
               ? [...q.answers]
               : type === 'true_false'
-              ? ['Prawda', 'Fałsz']
-              : ['', '', '', ''];
+                ? ['Prawda', 'Fałsz']
+                : ['', '', '', ''];
             base.answers = answers;
             base.answerImages = answers.map((_, idx) => q.answerImages?.[idx] || null);
             if (type === 'abcd' || type === 'true_false') {

@@ -16,3 +16,9 @@
     - ankieta (takie samo jak pytania, ale pod koniec się pokazuje wykres kołowy z odpowiedziami) [O, M]
     - prawda/fałsz [Q, M]
 - [x] możliwość dodawania zdjęć do pytań i odpowiedzi
+
+## zmiany 3
+- [ ] konfiguracja Github Action do automatycznego testowania, budowania i wdrażania aplikacji na serwerze 2115.2115.xyz:
+    - po merge'u na main ma być uruchamiany skrypt, który testuje aplikację i buduje nową paczkę
+    - jeśli testy przejdą pomyślnie, to skrypt ma się logować na serwer przez ssh (private key) i wdrażać nową paczkę (katalog ~/containers/cyber-quiz ze sklonowanym repo)
+    - po wdrożeniu restart kontenera cyber-quiz i swag

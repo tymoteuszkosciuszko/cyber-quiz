@@ -287,8 +287,7 @@ export function QuizEditor({
     setValidationError('');
     if (convertedCount > 0) {
       setModeNotice(
-        `Dostosowano ${convertedCount} ${
-          convertedCount === 1 ? 'pytanie' : 'pytań'
+        `Dostosowano ${convertedCount} ${convertedCount === 1 ? 'pytanie' : 'pytań'
         } do wybranego trybu „${QUIZ_MODES[nextMode].fullLabel}”.`
       );
     } else {
@@ -570,8 +569,8 @@ export function QuizEditor({
                 className={cn(
                   'h-11 font-heading text-base font-bold',
                   showValidation &&
-                    !editorTitle.trim() &&
-                    'border-danger ring-2 ring-danger/40'
+                  !editorTitle.trim() &&
+                  'border-danger ring-2 ring-danger/40'
                 )}
               />
             </div>
