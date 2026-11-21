@@ -1,0 +1,128 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: cyber-quiz-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Ustaw APP_DOMAIN w pliku .env (np. quiz.twojadomena.pl)}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/gcp/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      cyber-quiz:
+        condition: service_healthy
+    networks:
+      - cyber-quiz-internal
+      - cyber-quiz-edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cyber-quiz:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cyber-quiz:gcp
+    container_name: cyber-quiz
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      REDIS_HOST: cyber-quiz-redis
+      REDIS_PORT: 6379
+      PGHOST: cyber-quiz-db
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-cyber_quiz}
+      PGUSER: ${POSTGRES_USER:-cyber_quiz}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Ustaw POSTGRES_PASSWORD w pliku .env}
+      CORS_ORIGIN: ${CORS_ORIGIN:?Ustaw konkretny CORS_ORIGIN w pliku .env (np. https://quiz.twojadomena.pl)}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SESSION_IDLE_TTL_ADMIN: ${SESSION_IDLE_TTL_ADMIN:-3600}
+      SESSION_IDLE_TTL_SUPERADMIN: ${SESSION_IDLE_TTL_SUPERADMIN:-1800}
+      SESSION_ABSOLUTE_TTL: ${SESSION_ABSOLUTE_TTL:-28800}
+      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-Cyber Quiz}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
+      SUPERADMIN_MFA_ENFORCEMENT: ${SUPERADMIN_MFA_ENFORCEMENT:-required}
+      WEBAUTHN_USER_VERIFICATION: ${WEBAUTHN_USER_VERIFICATION:-required}
+    depends_on:
+      cyber-quiz-redis:
+        condition: service_healthy
+      cyber-quiz-db:
+        condition: service_healthy
+    networks:
+      - cyber-quiz-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cyber-quiz-db:
+    image: postgres:16-alpine
+    container_name: cyber-quiz-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cyber_quiz}
+      POSTGRES_USER: ${POSTGRES_USER:-cyber_quiz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Ustaw POSTGRES_PASSWORD w pliku .env}
+    volumes:
+      - cyber-quiz-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cyber_quiz} -d ${POSTGRES_DB:-cyber_quiz}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cyber-quiz-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  cyber-quiz-redis:
+    image: redis:7-alpine
+    container_name: cyber-quiz-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy volatile-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cyber-quiz-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  cyber-quiz-pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  # Sieć wewnętrzna bez dostępu do internetu (aplikacja + bazy danych)
+  cyber-quiz-internal:
+    driver: bridge
+    internal: true
+  # Sieć z dostępem do internetu dla Caddy (certyfikaty ACME / Let's Encrypt)
+  cyber-quiz-edge:
+    driver: bridge
+

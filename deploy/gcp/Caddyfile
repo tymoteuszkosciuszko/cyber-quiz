@@ -1,0 +1,22 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	request_body {
+		max_size 15MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# Caddy automatycznie obsługuje WebSockets (/socket.io/) oraz X-Forwarded-*
+	reverse_proxy cyber-quiz:3001 {
+		flush_interval -1
+	}
+}
+

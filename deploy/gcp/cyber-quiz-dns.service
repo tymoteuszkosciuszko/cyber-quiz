@@ -1,0 +1,15 @@
+[Unit]
+Description=Update Cyber Quiz DNS A record with current GCP ephemeral IPv4
+Wants=network-online.target
+After=network-online.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/cyber-quiz/deploy/gcp/update-dns.sh
+RemainAfterExit=yes
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+
