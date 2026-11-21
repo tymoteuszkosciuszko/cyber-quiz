@@ -26,3 +26,20 @@ export const HOST_STATUS_META = {
   PODIUM: { label: 'Podium i wyniki końcowe', variant: 'default' },
   ABORTED: { label: 'Gra przerwana', variant: 'danger' },
 };
+
+let questionUidSeq = 1;
+export function createQuestionUid() {
+  return `q-${Date.now()}-${questionUidSeq++}`;
+}
+
+export function createEmptyQuestion() {
+  return {
+    _uid: createQuestionUid(),
+    content: '',
+    image: null,
+    timeLimit: 20,
+    answers: ['', '', '', ''],
+    answerImages: [null, null, null, null],
+    correctIndex: 0,
+  };
+}

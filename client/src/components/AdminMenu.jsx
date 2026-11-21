@@ -102,6 +102,7 @@ export function AdminMenu({
                     {selectedQuizId === q.id && (
                       <Badge variant="default">Wybrany</Badge>
                     )}
+                    {q.hasImages && <Badge variant="info">Zdjęcia</Badge>}
                   </div>
                   <div className="text-xs text-foreground/75">
                     {q.questionsCount || '?'} pytań • ID: {q.id.slice(0, 8)}...
