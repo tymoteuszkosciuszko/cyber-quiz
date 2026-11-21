@@ -90,7 +90,7 @@ case "$ACTION" in
     echo "[vm-control] Wdrażam najnowszą wersję na '${VM_NAME}'..."
     gcloud compute ssh "$VM_NAME" \
       --project="$PROJECT_ID" --zone="$ZONE" --tunnel-through-iap --command \
-      "cd ${APP_DIR} && git fetch --prune origin main && git reset --hard origin/main && sudo docker compose -f docker-compose.gcp.yml build && sudo docker compose -f docker-compose.gcp.yml up -d --remove-orphans && sudo docker image prune -f"
+      "sudo DEPLOY_DIR='${APP_DIR}' bash '${APP_DIR}/deploy/gcp/deploy.sh'"
     ;;
 
   backup)

@@ -14,6 +14,7 @@ Gdy VM jest zatrzymana, płacisz **wyłącznie za dysk 20 GB (~$0,96/mies.)** �
 - `deploy/gcp/cyber-quiz-dns.service` — usługa `systemd` uruchamiająca `update-dns.sh` przed startem Dockera/Caddy.
 - `deploy/gcp/provision-gcp.sh` — jednorazowe utworzenie VM, firewalla (HTTP/HTTPS + SSH przez IAP) i harmonogramu auto-stop w GCP.
 - `deploy/gcp/vm-setup.sh` — jednorazowa instalacja Dockera, 2 GB swapu i usługi DNS na VM.
+- `deploy/gcp/deploy.sh` — skrypt wdrożeniowy uruchamiany na VM (przez GitHub Actions lub `vm-control.sh deploy`).
 - `deploy/gcp/vm-control.sh` — lokalny skrypt do codziennego `start` / `stop` / `status` / `ssh` / `deploy` / `backup`.
 
 ---
@@ -112,4 +113,43 @@ Następnie używaj:
 ./deploy/gcp/vm-control.sh deploy   # pobiera kod z main i przebudowuje kontener
 ./deploy/gcp/vm-control.sh backup   # zapisuje lokalny backup PostgreSQL (.sql.gz)
 ```
+
+---
+
+## Automatyczne wdrożenia przez GitHub Actions (CI/CD)
+
+Workflow `.github/workflows/deploy.yml` po każdym `push` na `main` (oraz przez ręczny `workflow_dispatch`) po przejściu testów uruchamia równolegle:
+- **`Deploy to 2115.2115.xyz`** — dotychczasowy serwer (OCI + SWAG),
+- **`Deploy to GCP`** — VM w GCP przez bezpieczny tunel IAP (`gcloud compute ssh --tunnel-through-iap`).
+
+**Obsługa trybu on-demand (zatrzymanej VM):**
+- Jeśli VM jest **uruchomiona** → workflow wdraża zmiany i zostawia VM uruchomioną.
+- Jeśli VM jest **zatrzymana** → workflow domyślnie (`start-and-stop`) uruchamia ją na ~2 minuty, wdraża nową wersję i **automatycznie zatrzymuje ją w kroku `if: always()`** (nawet jeśli deploy się nie powiedzie). Dzięki temu przy następnym uruchomieniu przed quizem masz już gotową najnowszą wersję.
+- Możesz zmienić to zachowanie na pomijanie wyłączonej VM, ustawiając w GitHub Actions zmienną `GCP_DEPLOY_WHEN_STOPPED=skip`.
+
+### Jednorazowa konfiguracja w GCP (Service Account dla GitHub Actions)
+
+1. W konsoli GCP wejdź w **IAM & Admin → Service Accounts → Create service account**:
+   - **Name:** `github-actions-deploy` → **Create and continue**.
+2. W kroku **Grant this service account access to project** dodaj 4 role:
+   - `Compute Instance Admin (v1)` (`roles/compute.instanceAdmin.v1`)
+   - `IAP-secured Tunnel User` (`roles/iap.tunnelResourceAccessor`)
+   - `Service Account User` (`roles/iam.serviceAccountUser`)
+   - `Compute OS Admin Login` (`roles/compute.osAdminLogin`)
+   - Kliknij **Continue → Done**.
+3. Kliknij nowo utworzone konto `github-actions-deploy@...` → zakładka **Keys → Add key → Create new key → JSON → Create** (pobierze się plik `.json`).
+
+### Konfiguracja sekretów i zmiennych w GitHub
+
+W repozytorium GitHub wejdź w **Settings → Secrets and variables → Actions**:
+
+- **Zakładka Secrets (wymagane):**
+  - `GCP_SA_KEY` — wklej całą zawartość pobranego pliku `.json` klucza Service Account.
+- **Zakładka Variables (lub Secrets):**
+  - `GCP_PROJECT_ID` *(wymagane)* — Twój Project ID w GCP (np. `cyber-quiz-prod-123456`).
+  - `GCP_ZONE` *(opcjonalne, domyślnie `europe-central2-a`)* — strefa VM.
+  - `GCP_VM_NAME` *(opcjonalne, domyślnie `cyber-quiz-vm`)* — nazwa VM.
+  - `GCP_DEPLOY_DIR` *(opcjonalne, domyślnie `/opt/cyber-quiz`)* — katalog aplikacji na VM.
+  - `GCP_DEPLOY_WHEN_STOPPED` *(opcjonalne, domyślnie `start-and-stop`)* — `start-and-stop` lub `skip`.
+
 
