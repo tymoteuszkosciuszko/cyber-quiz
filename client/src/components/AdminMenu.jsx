@@ -9,6 +9,7 @@ import {
   Label,
   Select,
 } from './ui';
+import { QUIZ_MODES } from '../constants';
 
 export function AdminMenu({
   quizzes,
@@ -29,22 +30,25 @@ export function AdminMenu({
         <CardHeader>
           <CardTitle>Uruchom sesję quizu</CardTitle>
           <CardDescription>
-            Wybierz zestaw pytań — ekran gry (rzutnik) otworzy się w osobnym oknie, a tutaj pojawi się panel prowadzącego.
+            Wybierz zestaw pytań (Quiz, Opinie lub Tryb mieszany) — ekran gry otworzy się w osobnym oknie, a tutaj pojawi się panel prowadzącego.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="space-y-2">
-            <Label htmlFor="quiz-select">Wybierz quiz</Label>
+            <Label htmlFor="quiz-select">Wybierz zestaw</Label>
             <Select
               id="quiz-select"
               value={selectedQuizId}
               onChange={(e) => setSelectedQuizId(e.target.value)}
             >
-              {quizzes.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.title} ({q.questionsCount || '?'} pytań)
-                </option>
-              ))}
+              {quizzes.map((q) => {
+                const modeMeta = QUIZ_MODES[q.mode] || QUIZ_MODES.quiz;
+                return (
+                  <option key={q.id} value={q.id}>
+                    [{modeMeta.code}] {q.title} ({q.questionsCount || '?'} pytań)
+                  </option>
+                );
+              })}
             </Select>
           </div>
           <Button
@@ -53,7 +57,7 @@ export function AdminMenu({
             onClick={onCreateHostRoom}
             className="w-full"
           >
-            Uruchom serwer quizu (Otwórz ekran gry + Panel prowadzącego)
+            Uruchom serwer sesji (Otwórz ekran gry + Panel prowadzącego)
           </Button>
         </CardContent>
       </Card>
@@ -62,12 +66,12 @@ export function AdminMenu({
       <Card>
         <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <CardTitle>Baza quizów</CardTitle>
+            <CardTitle>Baza zestawów</CardTitle>
             <Badge variant="neutral">{quizzes.length}</Badge>
           </div>
           <div className="flex flex-wrap gap-3">
             <Button type="button" size="sm" onClick={onOpenNewQuizEditor}>
-              + Nowy quiz
+              + Nowy zestaw
             </Button>
             <Button as="label" variant="neutral" size="sm">
               ↑ Importuj JSON
@@ -86,56 +90,62 @@ export function AdminMenu({
           <div className="space-y-3 max-h-80 overflow-y-auto pr-2 pb-2">
             {quizzes.length === 0 && (
               <div className="rounded-base border-2 border-border bg-background p-6 text-center text-sm text-foreground/75">
-                Brak quizów w bazie. Utwórz nowy quiz lub zaimportuj plik JSON.
+                Brak zestawów w bazie. Utwórz nowy zestaw lub zaimportuj plik JSON.
               </div>
             )}
-            {quizzes.map((q) => (
-              <div
-                key={q.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-base border-2 border-border bg-background p-4"
-              >
-                <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-heading text-base font-bold truncate">
-                      {q.title}
-                    </span>
-                    {selectedQuizId === q.id && (
-                      <Badge variant="default">Wybrany</Badge>
-                    )}
-                    {q.hasImages && <Badge variant="info">Zdjęcia</Badge>}
+            {quizzes.map((q) => {
+              const modeMeta = QUIZ_MODES[q.mode] || QUIZ_MODES.quiz;
+              return (
+                <div
+                  key={q.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-base border-2 border-border bg-background p-4"
+                >
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-heading text-base font-bold truncate">
+                        {q.title}
+                      </span>
+                      <Badge variant={modeMeta.badgeVariant}>
+                        {modeMeta.label} [{modeMeta.code}]
+                      </Badge>
+                      {selectedQuizId === q.id && (
+                        <Badge variant="default">Wybrany</Badge>
+                      )}
+                      {q.hasImages && <Badge variant="info">Zdjęcia</Badge>}
+                    </div>
+                    <div className="text-xs text-foreground/75">
+                      {q.questionsCount || '?'} pytań • ID: {q.id.slice(0, 8)}...
+                    </div>
                   </div>
-                  <div className="text-xs text-foreground/75">
-                    {q.questionsCount || '?'} pytań • ID: {q.id.slice(0, 8)}...
+                  <div className="flex flex-wrap gap-2 flex-shrink-0">
+                    <Button
+                      type="button"
+                      variant="neutral"
+                      size="sm"
+                      onClick={() => onOpenEditQuiz(q.id)}
+                    >
+                      Edytuj
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="neutral"
+                      size="sm"
+                      onClick={() => onExportQuiz(q.id)}
+                    >
+                      ↓ Eksport
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="danger"
+                      size="sm"
+                      onClick={() => onDeleteQuiz(q.id)}
+                    >
+                      Usuń
+                    </Button>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2 flex-shrink-0">
-                  <Button
-                    type="button"
-                    variant="neutral"
-                    size="sm"
-                    onClick={() => onOpenEditQuiz(q.id)}
-                  >
-                    Edytuj
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="neutral"
-                    size="sm"
-                    onClick={() => onExportQuiz(q.id)}
-                  >
-                    ↓ Eksport
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    size="sm"
-                    onClick={() => onDeleteQuiz(q.id)}
-                  >
-                    Usuń
-                  </Button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </CardContent>
       </Card>

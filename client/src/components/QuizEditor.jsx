@@ -10,9 +10,19 @@ import {
   CardTitle,
   Input,
   Label,
+  Select,
   cn,
 } from './ui';
-import { ANSWER_OPTIONS, createEmptyQuestion } from '../constants';
+import {
+  ANSWER_OPTIONS,
+  QUESTION_TYPES,
+  QUIZ_MODES,
+  TRUE_FALSE_OPTIONS,
+  convertQuestionType,
+  createEmptyQuestion,
+  getAllowedQuestionTypes,
+  isQuestionScored,
+} from '../constants';
 import {
   ANSWER_IMAGE_OPTIONS,
   QUESTION_IMAGE_OPTIONS,
@@ -60,6 +70,8 @@ export function QuizEditor({
   editingQuizId,
   editorTitle,
   setEditorTitle,
+  editorMode,
+  setEditorMode,
   editorQuestions,
   setEditorQuestions,
   onSaveQuiz,
@@ -68,12 +80,62 @@ export function QuizEditor({
   const [draggedIdx, setDraggedIdx] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
   const [imageError, setImageError] = useState('');
+  const [modeNotice, setModeNotice] = useState('');
   const [processingKey, setProcessingKey] = useState('');
+
+  const allowedTypes = getAllowedQuestionTypes(editorMode);
+  const modeMeta = QUIZ_MODES[editorMode] || QUIZ_MODES.quiz;
+
+  // ─── Zmiana trybu całego zestawu (Q / O / M) ───
+  const handleModeChange = (nextMode) => {
+    if (nextMode === editorMode) return;
+    const nextAllowed = getAllowedQuestionTypes(nextMode);
+    let convertedCount = 0;
+
+    setEditorQuestions((prev) =>
+      prev.map((q) => {
+        const curType = q.type || 'abcd';
+        if (!nextAllowed.includes(curType)) {
+          convertedCount++;
+          const targetType =
+            nextMode === 'opinion'
+              ? curType === 'abcd' || curType === 'true_false'
+                ? 'poll'
+                : 'word_cloud'
+              : 'abcd';
+          return convertQuestionType(q, targetType, nextMode);
+        }
+        if (curType === 'slider') {
+          return convertQuestionType(q, 'slider', nextMode);
+        }
+        return q;
+      })
+    );
+
+    setEditorMode(nextMode);
+    if (convertedCount > 0) {
+      setModeNotice(
+        `Dostosowano ${convertedCount} ${
+          convertedCount === 1 ? 'pytanie' : 'pytań'
+        } do wybranego trybu „${QUIZ_MODES[nextMode].fullLabel}”.`
+      );
+    } else {
+      setModeNotice('');
+    }
+  };
 
   const updateEditorQuestion = (qIdx, field, value) => {
     setEditorQuestions((prev) => {
       const copy = [...prev];
       copy[qIdx] = { ...copy[qIdx], [field]: value };
+      return copy;
+    });
+  };
+
+  const changeQuestionType = (qIdx, nextType) => {
+    setEditorQuestions((prev) => {
+      const copy = [...prev];
+      copy[qIdx] = convertQuestionType(copy[qIdx], nextType, editorMode);
       return copy;
     });
   };
@@ -97,6 +159,43 @@ export function QuizEditor({
         : current.answers.map(() => null);
       answerImages[aIdx] = imageDataUrl;
       copy[qIdx] = { ...current, answerImages };
+      return copy;
+    });
+  };
+
+  const addAnswerOption = (qIdx) => {
+    setEditorQuestions((prev) => {
+      const copy = [...prev];
+      const current = copy[qIdx];
+      if (!Array.isArray(current.answers) || current.answers.length >= 4) {
+        return prev;
+      }
+      const answers = [...current.answers, ''];
+      const answerImages = Array.isArray(current.answerImages)
+        ? [...current.answerImages, null]
+        : answers.map(() => null);
+      copy[qIdx] = { ...current, answers, answerImages };
+      return copy;
+    });
+  };
+
+  const removeAnswerOption = (qIdx, aIdx) => {
+    setEditorQuestions((prev) => {
+      const copy = [...prev];
+      const current = copy[qIdx];
+      if (!Array.isArray(current.answers) || current.answers.length <= 2) {
+        return prev;
+      }
+      const answers = current.answers.filter((_, i) => i !== aIdx);
+      const answerImages = (
+        Array.isArray(current.answerImages)
+          ? current.answerImages
+          : current.answers.map(() => null)
+      ).filter((_, i) => i !== aIdx);
+      let correctIndex = current.correctIndex ?? 0;
+      if (correctIndex === aIdx) correctIndex = 0;
+      else if (correctIndex > aIdx) correctIndex -= 1;
+      copy[qIdx] = { ...current, answers, answerImages, correctIndex };
       return copy;
     });
   };
@@ -188,7 +287,6 @@ export function QuizEditor({
   };
 
   const handleImageFileDrop = (e, onFile) => {
-    // Nie przechwytuj wewnętrznego przeciągania kolejności pytań
     if (draggedIdx !== null) return;
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) return;
@@ -212,16 +310,21 @@ export function QuizEditor({
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div>
               <CardTitle>
-                {editingQuizId ? 'Edycja quizu' : 'Nowy quiz'}
+                {editingQuizId ? 'Edycja zestawu' : 'Nowy zestaw'}
               </CardTitle>
               <CardDescription>
-                Dodaj pytania i zdjęcia, zmieniaj kolejność pytań, ustaw limit czasu i wskaż poprawną odpowiedź.
+                Wybierz tryb (Quiz, Opinie lub Mieszany), dobieraj formy pytań, dodawaj zdjęcia i ustawiaj kolejność.
               </CardDescription>
             </div>
-            <Badge variant="default">
-              {editorQuestions.length}{' '}
-              {editorQuestions.length === 1 ? 'pytanie' : 'pytań'}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant={modeMeta.badgeVariant}>
+                {modeMeta.label} [{modeMeta.code}]
+              </Badge>
+              <Badge variant="default">
+                {editorQuestions.length}{' '}
+                {editorQuestions.length === 1 ? 'pytanie' : 'pytań'}
+              </Badge>
+            </div>
           </div>
         </CardHeader>
 
@@ -244,8 +347,25 @@ export function QuizEditor({
               </Alert>
             )}
 
+            {modeNotice && (
+              <Alert
+                variant="info"
+                className="flex items-center justify-between gap-3 text-sm font-heading font-bold"
+              >
+                <span>{modeNotice}</span>
+                <Button
+                  type="button"
+                  variant="neutral"
+                  size="sm"
+                  onClick={() => setModeNotice('')}
+                >
+                  OK
+                </Button>
+              </Alert>
+            )}
+
             <div className="space-y-2">
-              <Label htmlFor="quiz-title">Nazwa quizu</Label>
+              <Label htmlFor="quiz-title">Nazwa zestawu</Label>
               <Input
                 id="quiz-title"
                 required
@@ -255,8 +375,46 @@ export function QuizEditor({
               />
             </div>
 
+            {/* Wybór trybu sesji: Quiz [Q] / Opinie [O] / Mieszany [M] */}
+            <div className="space-y-2">
+              <Label>Tryb sesji</Label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {Object.values(QUIZ_MODES).map((m) => {
+                  const selected = editorMode === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => handleModeChange(m.id)}
+                      className={cn(
+                        'flex flex-col items-start gap-1.5 rounded-base border-2 border-border p-3.5 text-left transition-all cursor-pointer',
+                        selected
+                          ? 'bg-main shadow-shadow'
+                          : 'bg-background hover:bg-secondary-background'
+                      )}
+                    >
+                      <div className="flex w-full items-center justify-between gap-2">
+                        <span className="font-heading text-sm font-extrabold">
+                          {m.label}
+                        </span>
+                        <Badge variant={selected ? 'neutral' : m.badgeVariant}>
+                          {m.code}
+                        </Badge>
+                      </div>
+                      <span className="text-xs leading-snug text-foreground/80">
+                        {m.description}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="space-y-5">
               {editorQuestions.map((q, qIdx) => {
+                const qType = q.type || 'abcd';
+                const typeMeta = QUESTION_TYPES[qType] || QUESTION_TYPES.abcd;
+                const scored = isQuestionScored(q, editorMode);
                 const isDragged = draggedIdx === qIdx;
                 const isDropTarget =
                   dragOverIdx === qIdx &&
@@ -281,7 +439,7 @@ export function QuizEditor({
                   >
                     {/* Nagłówek karty pytania z kontrolkami kolejności */}
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         {editorQuestions.length > 1 && (
                           <button
                             type="button"
@@ -294,6 +452,9 @@ export function QuizEditor({
                           </button>
                         )}
                         <Badge variant="default">Pytanie #{qIdx + 1}</Badge>
+                        <Badge variant={scored ? 'warning' : 'info'}>
+                          {scored ? 'Punktowane' : 'Opinia'}
+                        </Badge>
 
                         {editorQuestions.length > 1 && (
                           <div className="inline-flex items-center gap-1">
@@ -328,7 +489,7 @@ export function QuizEditor({
                       <div className="flex flex-wrap items-center gap-3">
                         <div className="flex items-center gap-2">
                           <Label htmlFor={`time-${qIdx}`} className="text-xs">
-                            Limit czasu (s):
+                            Czas (s):
                           </Label>
                           <Input
                             id={`time-${qIdx}`}
@@ -361,6 +522,25 @@ export function QuizEditor({
                           </Button>
                         )}
                       </div>
+                    </div>
+
+                    {/* Wybór formy pytania */}
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`q-type-${qIdx}`} className="text-xs">
+                        Forma pytania
+                      </Label>
+                      <Select
+                        id={`q-type-${qIdx}`}
+                        value={qType}
+                        onChange={(e) => changeQuestionType(qIdx, e.target.value)}
+                        className="h-10 text-sm"
+                      >
+                        {allowedTypes.map((t) => (
+                          <option key={t} value={t}>
+                            {QUESTION_TYPES[t].label}
+                          </option>
+                        ))}
+                      </Select>
                     </div>
 
                     {/* Treść pytania */}
@@ -450,40 +630,198 @@ export function QuizEditor({
                       )}
                     </div>
 
-                    {/* Odpowiedzi z opcjonalnymi zdjęciami */}
-                    <div className="space-y-2">
-                      <Label className="text-xs">
-                        Odpowiedzi (zaznacz poprawną — każda może zawierać tekst, zdjęcie lub oba)
-                      </Label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {q.answers.map((ans, aIdx) => {
-                          const opt = ANSWER_OPTIONS[aIdx];
-                          const isCorrect = q.correctIndex === aIdx;
-                          const ansImage = q.answerImages?.[aIdx] || null;
-                          const isProcessingAnsImg =
-                            processingKey === `a-${qIdx}-${aIdx}`;
+                    {/* SEKCJA SPECYFICZNA DLA FORMY PYTANIA */}
 
-                          return (
-                            <div
-                              key={aIdx}
-                              onDragOver={handleImageFileDragOver}
-                              onDrop={(e) =>
-                                handleImageFileDrop(e, (file) =>
-                                  handleAnswerImageFile(qIdx, aIdx, file)
-                                )
-                              }
-                              className={cn(
-                                'flex flex-col gap-2 rounded-base border-2 border-border p-2 transition-colors',
-                                isCorrect
-                                  ? 'bg-main'
-                                  : 'bg-secondary-background'
-                              )}
+                    {/* 1. ABCD oraz 2. ANKIETA (POLL) */}
+                    {(qType === 'abcd' || qType === 'poll') && (
+                      <div className="space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <Label className="text-xs">
+                            {qType === 'abcd'
+                              ? 'Odpowiedzi (zaznacz poprawną — tekst, zdjęcie lub oba)'
+                              : 'Opcje ankiety (niepunktowane — pod koniec pojawi się wykres kołowy)'}
+                          </Label>
+                          {q.answers.length < 4 && (
+                            <Button
+                              type="button"
+                              variant="neutral"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => addAnswerOption(qIdx)}
                             >
-                              <div className="flex items-center gap-2">
+                              + Dodaj opcję
+                            </Button>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          {q.answers.map((ans, aIdx) => {
+                            const opt = ANSWER_OPTIONS[aIdx];
+                            const isCorrect =
+                              qType === 'abcd' && q.correctIndex === aIdx;
+                            const ansImage = q.answerImages?.[aIdx] || null;
+                            const isProcessingAnsImg =
+                              processingKey === `a-${qIdx}-${aIdx}`;
+
+                            return (
+                              <div
+                                key={aIdx}
+                                onDragOver={handleImageFileDragOver}
+                                onDrop={(e) =>
+                                  handleImageFileDrop(e, (file) =>
+                                    handleAnswerImageFile(qIdx, aIdx, file)
+                                  )
+                                }
+                                className={cn(
+                                  'flex flex-col gap-2 rounded-base border-2 border-border p-2 transition-colors',
+                                  isCorrect
+                                    ? 'bg-main'
+                                    : 'bg-secondary-background'
+                                )}
+                              >
+                                <div className="flex items-center gap-2">
+                                  {qType === 'abcd' && (
+                                    <input
+                                      type="radio"
+                                      name={`correct-${qIdx}`}
+                                      aria-label={`Oznacz odpowiedź ${opt.label} jako poprawną`}
+                                      checked={isCorrect}
+                                      onChange={() =>
+                                        updateEditorQuestion(
+                                          qIdx,
+                                          'correctIndex',
+                                          aIdx
+                                        )
+                                      }
+                                      className="h-4 w-4 accent-black cursor-pointer flex-shrink-0"
+                                    />
+                                  )}
+                                  <Badge
+                                    variant={opt.badgeVariant}
+                                    className="flex-shrink-0"
+                                  >
+                                    {opt.label}
+                                  </Badge>
+                                  <Input
+                                    required={!ansImage}
+                                    placeholder={
+                                      ansImage
+                                        ? `Opis ${opt.label} (opcjonalny)`
+                                        : `Opcja ${opt.label}`
+                                    }
+                                    value={ans}
+                                    onChange={(e) =>
+                                      updateEditorAnswer(
+                                        qIdx,
+                                        aIdx,
+                                        e.target.value
+                                      )
+                                    }
+                                    className="h-9 text-sm"
+                                  />
+                                  <Button
+                                    as="label"
+                                    variant="neutral"
+                                    size="sm"
+                                    title={
+                                      ansImage
+                                        ? `Zmień zdjęcie opcji ${opt.label}`
+                                        : `Dodaj zdjęcie do opcji ${opt.label}`
+                                    }
+                                    aria-label={
+                                      ansImage
+                                        ? `Zmień zdjęcie opcji ${opt.label}`
+                                        : `Dodaj zdjęcie do opcji ${opt.label}`
+                                    }
+                                    className="h-9 w-9 px-0 flex-shrink-0"
+                                  >
+                                    <ImageIcon className="h-4 w-4" />
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      disabled={isProcessingAnsImg}
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) {
+                                          handleAnswerImageFile(qIdx, aIdx, file);
+                                        }
+                                        e.target.value = '';
+                                      }}
+                                      className="hidden"
+                                    />
+                                  </Button>
+                                  {q.answers.length > 2 && (
+                                    <Button
+                                      type="button"
+                                      variant="danger"
+                                      size="sm"
+                                      title={`Usuń opcję ${opt.label}`}
+                                      aria-label={`Usuń opcję ${opt.label}`}
+                                      onClick={() => removeAnswerOption(qIdx, aIdx)}
+                                      className="h-9 w-8 px-0 flex-shrink-0 text-xs"
+                                    >
+                                      ✕
+                                    </Button>
+                                  )}
+                                </div>
+
+                                {isProcessingAnsImg && (
+                                  <div className="text-center text-xs font-heading font-bold py-2">
+                                    Przetwarzanie zdjęcia...
+                                  </div>
+                                )}
+
+                                {ansImage && !isProcessingAnsImg && (
+                                  <div className="relative flex items-center justify-center rounded-base border-2 border-border bg-background p-1.5">
+                                    <img
+                                      src={ansImage}
+                                      alt={`Podgląd zdjęcia opcji ${opt.label}`}
+                                      className="max-h-28 w-auto max-w-full rounded-[3px] object-contain"
+                                    />
+                                    <Button
+                                      type="button"
+                                      variant="danger"
+                                      size="sm"
+                                      onClick={() =>
+                                        updateEditorAnswerImage(qIdx, aIdx, null)
+                                      }
+                                      title={`Usuń zdjęcie z opcji ${opt.label}`}
+                                      aria-label={`Usuń zdjęcie z opcji ${opt.label}`}
+                                      className="absolute right-1.5 top-1.5 h-7 w-7 px-0 text-xs"
+                                    >
+                                      ✕
+                                    </Button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 3. PRAWDA / FAŁSZ */}
+                    {qType === 'true_false' && (
+                      <div className="space-y-2">
+                        <Label className="text-xs">
+                          Poprawna odpowiedź (Prawda / Fałsz)
+                        </Label>
+                        <div className="grid grid-cols-2 gap-3">
+                          {TRUE_FALSE_OPTIONS.map((opt, aIdx) => {
+                            const isCorrect = q.correctIndex === aIdx;
+                            return (
+                              <label
+                                key={opt.label}
+                                className={cn(
+                                  'flex items-center justify-center gap-3 rounded-base border-2 border-border p-3.5 cursor-pointer font-heading text-base font-extrabold transition-all',
+                                  isCorrect
+                                    ? `${opt.bgClass} shadow-shadow`
+                                    : 'bg-secondary-background hover:bg-background'
+                                )}
+                              >
                                 <input
                                   type="radio"
                                   name={`correct-${qIdx}`}
-                                  aria-label={`Oznacz odpowiedź ${opt.label} jako poprawną`}
                                   checked={isCorrect}
                                   onChange={() =>
                                     updateEditorQuestion(
@@ -492,114 +830,285 @@ export function QuizEditor({
                                       aIdx
                                     )
                                   }
-                                  className="h-4 w-4 accent-black cursor-pointer flex-shrink-0"
+                                  className="h-4 w-4 accent-black cursor-pointer"
                                 />
-                                <Badge
-                                  variant={opt.badgeVariant}
-                                  className="flex-shrink-0"
-                                >
-                                  {opt.label}
-                                </Badge>
-                                <Input
-                                  required={!ansImage}
-                                  placeholder={
-                                    ansImage
-                                      ? `Opis ${opt.label} (opcjonalny)`
-                                      : `Opcja ${opt.label}`
-                                  }
-                                  value={ans}
-                                  onChange={(e) =>
-                                    updateEditorAnswer(
-                                      qIdx,
-                                      aIdx,
-                                      e.target.value
-                                    )
-                                  }
-                                  className="h-9 text-sm"
-                                />
-                                <Button
-                                  as="label"
-                                  variant="neutral"
-                                  size="sm"
-                                  title={
-                                    ansImage
-                                      ? `Zmień zdjęcie odpowiedzi ${opt.label}`
-                                      : `Dodaj zdjęcie do odpowiedzi ${opt.label}`
-                                  }
-                                  aria-label={
-                                    ansImage
-                                      ? `Zmień zdjęcie odpowiedzi ${opt.label}`
-                                      : `Dodaj zdjęcie do odpowiedzi ${opt.label}`
-                                  }
-                                  className="h-9 w-9 px-0 flex-shrink-0"
-                                >
-                                  <ImageIcon className="h-4 w-4" />
-                                  <input
-                                    type="file"
-                                    accept="image/*"
-                                    disabled={isProcessingAnsImg}
-                                    onChange={(e) => {
-                                      const file = e.target.files?.[0];
-                                      if (file) {
-                                        handleAnswerImageFile(qIdx, aIdx, file);
-                                      }
-                                      e.target.value = '';
-                                    }}
-                                    className="hidden"
+                                <span>{opt.symbol}</span>
+                                <span>{opt.label}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 4. SLIDER (przedział liczbowy) */}
+                    {qType === 'slider' && (() => {
+                      const sMin = Number(q.sliderMin ?? 0);
+                      const sMax = Number(q.sliderMax ?? 100);
+                      const sStep = Number(q.sliderStep ?? 1) || 1;
+                      const sCorrect = Number(
+                        q.sliderCorrect ?? Math.round((sMin + sMax) / 2)
+                      );
+                      const sTol = Number(q.sliderTolerance ?? 0);
+
+                      return (
+                        <div className="space-y-4 rounded-base border-2 border-border bg-secondary-background p-4">
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            <div className="space-y-1">
+                              <Label htmlFor={`s-min-${qIdx}`} className="text-xs">
+                                Minimum
+                              </Label>
+                              <Input
+                                id={`s-min-${qIdx}`}
+                                type="number"
+                                step="any"
+                                required
+                                value={q.sliderMin ?? 0}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  updateEditorQuestion(qIdx, 'sliderMin', val);
+                                }}
+                                className="h-9 text-sm font-heading font-bold tabular-nums"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label htmlFor={`s-max-${qIdx}`} className="text-xs">
+                                Maksimum
+                              </Label>
+                              <Input
+                                id={`s-max-${qIdx}`}
+                                type="number"
+                                step="any"
+                                required
+                                value={q.sliderMax ?? 100}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  updateEditorQuestion(qIdx, 'sliderMax', val);
+                                }}
+                                className="h-9 text-sm font-heading font-bold tabular-nums"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label htmlFor={`s-step-${qIdx}`} className="text-xs">
+                                Krok
+                              </Label>
+                              <Input
+                                id={`s-step-${qIdx}`}
+                                type="number"
+                                step="any"
+                                min="0.01"
+                                required
+                                value={q.sliderStep ?? 1}
+                                onChange={(e) =>
+                                  updateEditorQuestion(
+                                    qIdx,
+                                    'sliderStep',
+                                    Number(e.target.value)
+                                  )
+                                }
+                                className="h-9 text-sm font-heading font-bold tabular-nums"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label htmlFor={`s-unit-${qIdx}`} className="text-xs">
+                                Jednostka (opcj.)
+                              </Label>
+                              <Input
+                                id={`s-unit-${qIdx}`}
+                                maxLength={16}
+                                placeholder="np. %, lat, km"
+                                value={q.sliderUnit || ''}
+                                onChange={(e) =>
+                                  updateEditorQuestion(
+                                    qIdx,
+                                    'sliderUnit',
+                                    e.target.value
+                                  )
+                                }
+                                className="h-9 text-sm"
+                              />
+                            </div>
+                          </div>
+
+                          {editorMode === 'mixed' && (
+                            <label className="flex items-center gap-2.5 text-sm font-heading font-bold cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={scored}
+                                onChange={(e) =>
+                                  updateEditorQuestion(
+                                    qIdx,
+                                    'scored',
+                                    e.target.checked
+                                  )
+                                }
+                                className="h-4 w-4 accent-black cursor-pointer"
+                              />
+                              <span>
+                                Pytanie punktowane (z poprawną wartością i tolerancją)
+                              </span>
+                            </label>
+                          )}
+
+                          {scored ? (
+                            <div className="space-y-3 border-t-2 border-border pt-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                  <Label
+                                    htmlFor={`s-correct-${qIdx}`}
+                                    className="text-xs"
+                                  >
+                                    Poprawna wartość ({sMin} – {sMax})
+                                  </Label>
+                                  <Input
+                                    id={`s-correct-${qIdx}`}
+                                    type="number"
+                                    step="any"
+                                    min={sMin}
+                                    max={sMax}
+                                    required
+                                    value={q.sliderCorrect ?? sCorrect}
+                                    onChange={(e) =>
+                                      updateEditorQuestion(
+                                        qIdx,
+                                        'sliderCorrect',
+                                        Number(e.target.value)
+                                      )
+                                    }
+                                    className="h-9 text-sm font-heading font-bold tabular-nums"
                                   />
-                                </Button>
+                                </div>
+                                <div className="space-y-1">
+                                  <Label
+                                    htmlFor={`s-tol-${qIdx}`}
+                                    className="text-xs"
+                                  >
+                                    Tolerancja (± dla punktów częściowych)
+                                  </Label>
+                                  <Input
+                                    id={`s-tol-${qIdx}`}
+                                    type="number"
+                                    step="any"
+                                    min="0"
+                                    value={q.sliderTolerance ?? 0}
+                                    onChange={(e) =>
+                                      updateEditorQuestion(
+                                        qIdx,
+                                        'sliderTolerance',
+                                        Math.max(0, Number(e.target.value))
+                                      )
+                                    }
+                                    className="h-9 text-sm font-heading font-bold tabular-nums"
+                                  />
+                                </div>
                               </div>
 
-                              {isProcessingAnsImg && (
-                                <div className="text-center text-xs font-heading font-bold py-2">
-                                  Przetwarzanie zdjęcia...
-                                </div>
-                              )}
-
-                              {ansImage && !isProcessingAnsImg && (
-                                <div className="relative flex items-center justify-center rounded-base border-2 border-border bg-background p-1.5">
-                                  <img
-                                    src={ansImage}
-                                    alt={`Podgląd zdjęcia odpowiedzi ${opt.label}`}
-                                    className="max-h-28 w-auto max-w-full rounded-[3px] object-contain"
-                                  />
-                                  <Button
-                                    type="button"
-                                    variant="danger"
-                                    size="sm"
-                                    onClick={() =>
-                                      updateEditorAnswerImage(qIdx, aIdx, null)
+                              {sMax > sMin && (
+                                <div className="space-y-1">
+                                  <input
+                                    type="range"
+                                    min={sMin}
+                                    max={sMax}
+                                    step={sStep > 0 ? sStep : 1}
+                                    value={Math.min(sMax, Math.max(sMin, sCorrect))}
+                                    onChange={(e) =>
+                                      updateEditorQuestion(
+                                        qIdx,
+                                        'sliderCorrect',
+                                        Number(e.target.value)
+                                      )
                                     }
-                                    title={`Usuń zdjęcie z odpowiedzi ${opt.label}`}
-                                    aria-label={`Usuń zdjęcie z odpowiedzi ${opt.label}`}
-                                    className="absolute right-1.5 top-1.5 h-7 w-7 px-0 text-xs"
-                                  >
-                                    ✕
-                                  </Button>
+                                    className="w-full accent-black cursor-pointer"
+                                  />
+                                  <div className="flex justify-between text-xs font-heading font-bold text-foreground/75 tabular-nums">
+                                    <span>
+                                      {sMin} {q.sliderUnit || ''}
+                                    </span>
+                                    <span>
+                                      Cel: {sCorrect}
+                                      {sTol > 0 ? ` (±${sTol})` : ''}{' '}
+                                      {q.sliderUnit || ''}
+                                    </span>
+                                    <span>
+                                      {sMax} {q.sliderUnit || ''}
+                                    </span>
+                                  </div>
                                 </div>
                               )}
                             </div>
-                          );
-                        })}
+                          ) : (
+                            <p className="text-xs text-foreground/75">
+                              Tryb niepunktowany — uczestnicy wskazują wartość w przedziale, a na koniec wyświetli się rozkład, średnia i mediana odpowiedzi.
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* 5. CHMURA SŁÓW */}
+                    {qType === 'word_cloud' && (
+                      <div className="rounded-base border-2 border-border bg-secondary-background p-4 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="space-y-0.5">
+                            <div className="text-xs font-heading font-bold">
+                              Chmura słów (niepunktowana)
+                            </div>
+                            <p className="text-xs text-foreground/75">
+                              Każdy uczestnik wpisuje krótkie hasło na telefonie — najczęstsze odpowiedzi będą największe na ekranie głównym.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Label
+                              htmlFor={`wc-len-${qIdx}`}
+                              className="text-xs whitespace-nowrap"
+                            >
+                              Maks. znaków:
+                            </Label>
+                            <Input
+                              id={`wc-len-${qIdx}`}
+                              type="number"
+                              min="10"
+                              max="80"
+                              value={q.maxLength ?? 32}
+                              onChange={(e) =>
+                                updateEditorQuestion(
+                                  qIdx,
+                                  'maxLength',
+                                  Number(e.target.value)
+                                )
+                              }
+                              className="h-9 w-20 text-center font-heading font-bold tabular-nums"
+                            />
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 );
               })}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-4 border-t-2 border-border pt-5">
-              <Button
-                type="button"
-                variant="neutral"
-                onClick={() =>
-                  setEditorQuestions((prev) => [...prev, createEmptyQuestion()])
-                }
-              >
-                + Dodaj kolejne pytanie
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                {allowedTypes.map((t) => (
+                  <Button
+                    key={t}
+                    type="button"
+                    variant="neutral"
+                    size="sm"
+                    onClick={() =>
+                      setEditorQuestions((prev) => [
+                        ...prev,
+                        createEmptyQuestion(t, editorMode),
+                      ])
+                    }
+                  >
+                    + {QUESTION_TYPES[t].shortLabel}
+                  </Button>
+                ))}
+              </div>
               <Button type="submit" size="lg">
-                {editingQuizId ? 'Zapisz zmiany' : 'Utwórz quiz'}
+                {editingQuizId ? 'Zapisz zmiany' : 'Utwórz zestaw'}
               </Button>
             </div>
           </form>

@@ -11,7 +11,17 @@ import {
   Progress,
   cn,
 } from './ui';
-import { ANSWER_OPTIONS, HOST_STATUS_META } from '../constants';
+import {
+  ANSWER_OPTIONS,
+  HOST_STATUS_META,
+  QUESTION_TYPES,
+  QUIZ_MODES,
+  TRUE_FALSE_OPTIONS,
+  isQuestionScored,
+} from '../constants';
+import { PieChart } from './results/PieChart';
+import { WordCloud } from './results/WordCloud';
+import { SliderResults } from './results/SliderResults';
 
 export function HostControlPanel({
   roomPin,
@@ -29,6 +39,7 @@ export function HostControlPanel({
   leaderboardData,
   autoNextSeconds,
   allResults,
+  sessionEndMeta,
   onOpenGameScreen,
   onStartGame,
   onForceNext,
@@ -42,6 +53,11 @@ export function HostControlPanel({
     label: hostStatus,
     variant: 'neutral',
   };
+  const quizMode = activeQuiz?.mode || sessionEndMeta?.sessionMode || 'quiz';
+  const modeMeta = QUIZ_MODES[quizMode] || QUIZ_MODES.quiz;
+  const isOpinionEnd =
+    sessionEndMeta?.hasScoredQuestions === false ||
+    sessionEndMeta?.sessionMode === 'opinion';
 
   const screenUrl = `${window.location.origin}/game-screen?pin=${roomPin}`;
   const playerUrl = `${window.location.origin}/?pin=${roomPin}`;
@@ -59,11 +75,20 @@ export function HostControlPanel({
       ? activeQuiz.questions[activeQuestionIndex]
       : null;
 
+  const activeQType = activeQuizQuestion?.type || currentQuestion?.type || 'abcd';
+  const activeQTypeMeta = QUESTION_TYPES[activeQType] || QUESTION_TYPES.abcd;
+  const activeQScored = activeQuizQuestion
+    ? isQuestionScored(activeQuizQuestion, quizMode)
+    : currentQuestion?.scored !== false;
+
   return (
     <main className="mx-auto w-full max-w-6xl space-y-6 animate-screen-enter">
       {/* OSTRZEŻENIE O ZABLOKOWANYM POPUPIE */}
       {popupBlocked && connectedScreens === 0 && (
-        <Alert variant="warning" className="flex flex-wrap items-center justify-between gap-3">
+        <Alert
+          variant="warning"
+          className="flex flex-wrap items-center justify-between gap-3"
+        >
           <div className="text-sm font-heading font-bold">
             Przeglądarka zablokowała automatyczne otwarcie okna ekranu gry. Kliknij przycisk obok, aby otworzyć ekran rzutnika.
           </div>
@@ -79,6 +104,9 @@ export function HostControlPanel({
           <div className="space-y-1.5 min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
+              <Badge variant={modeMeta.badgeVariant}>
+                {modeMeta.label} [{modeMeta.code}]
+              </Badge>
               <Badge
                 variant={connectedScreens > 0 ? 'default' : 'warning'}
                 className="tabular-nums"
@@ -88,11 +116,11 @@ export function HostControlPanel({
                   : 'Ekran gry: Nieotwarty'}
               </Badge>
               <Badge variant="neutral" className="tabular-nums">
-                Gracze: {playersList.length}
+                Uczestnicy: {playersList.length}
               </Badge>
             </div>
             <CardTitle className="truncate">
-              {activeQuiz?.title || 'Aktywna sesja quizu'}
+              {activeQuiz?.title || 'Aktywna sesja'}
             </CardTitle>
             <CardDescription>
               Panel prowadzącego — steruj przebiegiem rundy bez przełączania się na ekran rzutnika.
@@ -130,7 +158,7 @@ export function HostControlPanel({
         <div className="lg:col-span-5 space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>Sterowanie grą</CardTitle>
+              <CardTitle>Sterowanie sesją</CardTitle>
               <CardDescription>
                 Dostępne akcje dla bieżącej fazy rozgrywki.
               </CardDescription>
@@ -146,11 +174,11 @@ export function HostControlPanel({
                     disabled={playersList.length === 0}
                     className="w-full py-4 text-base"
                   >
-                    ▶ Rozpocznij quiz
+                    ▶ Rozpocznij sesję
                   </Button>
                   {playersList.length === 0 && (
                     <p className="text-xs text-foreground/75 text-center">
-                      Poczekaj, aż przynajmniej 1 gracz dołączy do sesji.
+                      Poczekaj, aż przynajmniej 1 uczestnik dołączy do sesji.
                     </p>
                   )}
                   <Button
@@ -161,8 +189,8 @@ export function HostControlPanel({
                     className="w-full"
                   >
                     {copiedKey === 'player'
-                      ? '✓ Skopiowano link dla graczy'
-                      : 'Kopiuj link dołączania dla graczy'}
+                      ? '✓ Skopiowano link dla uczestników'
+                      : 'Kopiuj link dołączania dla uczestników'}
                   </Button>
                 </div>
               )}
@@ -197,7 +225,7 @@ export function HostControlPanel({
                 <div className="space-y-4">
                   <div className="rounded-base border-2 border-border bg-background p-4 space-y-2">
                     <div className="flex items-center justify-between text-xs font-heading font-bold uppercase">
-                      <span>Podgląd pytania — ujawnienie odpowiedzi</span>
+                      <span>Podgląd pytania — odblokowanie kontrolek</span>
                       <span className="tabular-nums">
                         {previewTimeLeft.toFixed(1)} s
                       </span>
@@ -218,7 +246,7 @@ export function HostControlPanel({
                     onClick={onForceNext}
                     className="w-full"
                   >
-                    ⏭ Pokaż odpowiedzi teraz →
+                    ⏭ Rozpocznij odpowiadanie teraz →
                   </Button>
                 </div>
               )}
@@ -281,7 +309,9 @@ export function HostControlPanel({
                     className="w-full"
                   >
                     {leaderboardData.isLastQuestion
-                      ? '🏆 Przejdź do podium →'
+                      ? quizMode === 'opinion'
+                        ? '✓ Przejdź do podsumowania →'
+                        : '🏆 Przejdź do podium →'
                       : '⏭ Przewiń do następnego pytania →'}
                   </Button>
 
@@ -299,11 +329,13 @@ export function HostControlPanel({
                 </div>
               )}
 
-              {/* PODIUM */}
+              {/* PODIUM / PODSUMOWANIE */}
               {hostStatus === 'PODIUM' && (
                 <div className="space-y-3">
                   <Alert variant="default" className="text-sm font-heading font-bold">
-                    Quiz został zakończony. Na ekranie gry wyświetlane jest podium oraz pełna lista wyników.
+                    {isOpinionEnd
+                      ? 'Sesja opinii została zakończona. Na ekranie głównym wyświetlane jest podsumowanie zebranych odpowiedzi.'
+                      : 'Quiz został zakończony. Na ekranie gry wyświetlane jest podium oraz pełna lista wyników.'}
                   </Alert>
                   <Button
                     type="button"
@@ -326,19 +358,19 @@ export function HostControlPanel({
                     onClick={onAbortGame}
                     className="w-full"
                   >
-                    ✕ Przerwij grę
+                    ✕ Przerwij sesję
                   </Button>
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* PLAN PYTAŃ QUIZU */}
+          {/* PLAN PYTAŃ */}
           {activeQuiz?.questions && (
             <Card>
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between gap-2">
-                  <CardTitle className="text-lg">Pytania w quizie</CardTitle>
+                  <CardTitle className="text-lg">Pytania w zestawie</CardTitle>
                   <Badge variant="neutral" className="tabular-nums">
                     {activeQuiz.questions.length}
                   </Badge>
@@ -355,12 +387,14 @@ export function HostControlPanel({
                     const isDone =
                       hostStatus === 'PODIUM' ||
                       (activeQuestionIndex > idx && hostStatus !== 'LOBBY');
+                    const tMeta =
+                      QUESTION_TYPES[q.type || 'abcd'] || QUESTION_TYPES.abcd;
 
                     return (
                       <div
                         key={idx}
                         className={cn(
-                          'flex items-start gap-2.5 rounded-base border-2 border-border px-3 py-2 text-xs transition-colors',
+                          'flex items-start gap-2 rounded-base border-2 border-border px-3 py-2 text-xs transition-colors',
                           isCurrent
                             ? 'bg-main font-bold'
                             : isDone
@@ -383,6 +417,12 @@ export function HostControlPanel({
                         <span className="line-clamp-2 leading-snug flex-1 min-w-0">
                           {q.content || '(Pytanie ze zdjęciem)'}
                         </span>
+                        <Badge
+                          variant={tMeta.badgeVariant}
+                          className="flex-shrink-0 text-[10px] px-1.5 py-0"
+                        >
+                          {tMeta.shortLabel}
+                        </Badge>
                         {(q.image || q.answerImages?.some(Boolean)) && (
                           <Badge
                             variant="info"
@@ -414,7 +454,7 @@ export function HostControlPanel({
                   </Badge>
                 </div>
                 <CardDescription>
-                  Gracze widoczni na żywo po zeskanowaniu kodu QR lub wpisaniu PIN-u na ekranie gry.
+                  Uczestnicy widoczni na żywo po zeskanowaniu kodu QR lub wpisaniu PIN-u na ekranie gry.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -430,7 +470,7 @@ export function HostControlPanel({
                   ))}
                   {playersList.length === 0 && (
                     <span className="text-sm text-foreground/75">
-                      Oczekiwanie na pierwszego gracza... Udostępnij PIN{' '}
+                      Oczekiwanie na pierwszego uczestnika... Udostępnij PIN{' '}
                       <strong>{roomPin}</strong> lub otwórz ekran gry na rzutniku.
                     </span>
                   )}
@@ -439,7 +479,7 @@ export function HostControlPanel({
             </Card>
           )}
 
-          {/* PODGLĄD AKTYWNEGO PYTANIA DLA PROWADZĄCEGO (z zaznaczoną poprawną odpowiedzią!) */}
+          {/* PODGLĄD AKTYWNEGO PYTANIA DLA PROWADZĄCEGO */}
           {(hostStatus === 'QUESTION_PREVIEW' ||
             hostStatus === 'QUESTION' ||
             hostStatus === 'LEADERBOARD') &&
@@ -454,7 +494,14 @@ export function HostControlPanel({
                       Podgląd pytania {activeQuestionIndex + 1} /{' '}
                       {activeQuiz.questions.length}
                     </CardTitle>
-                    <Badge variant="neutral">Tylko dla prowadzącego</Badge>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant={activeQTypeMeta.badgeVariant}>
+                        {activeQTypeMeta.label}
+                      </Badge>
+                      <Badge variant={activeQScored ? 'warning' : 'info'}>
+                        {activeQScored ? 'Punktowane' : 'Opinia'}
+                      </Badge>
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-5">
@@ -475,145 +522,328 @@ export function HostControlPanel({
                     )}
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {activeQuizQuestion.answers.map((ans, idx) => {
-                      const opt = ANSWER_OPTIONS[idx];
-                      const isCorrect = idx === activeQuizQuestion.correctIndex;
-                      const ansImg = activeQuizQuestion.answerImages?.[idx];
-                      const distCount =
-                        hostStatus === 'LEADERBOARD' && leaderboardData?.distribution
-                          ? leaderboardData.distribution[idx]
-                          : null;
+                  {/* ABCD / PRAWDA-FAŁSZ / ANKIETA (opcje przed wynikami lub przy ABCD/TF) */}
+                  {(activeQType === 'abcd' ||
+                    activeQType === 'true_false' ||
+                    (activeQType === 'poll' && hostStatus !== 'LEADERBOARD')) &&
+                    Array.isArray(activeQuizQuestion.answers) && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {activeQuizQuestion.answers.map((ans, idx) => {
+                          const opt =
+                            activeQType === 'true_false'
+                              ? TRUE_FALSE_OPTIONS[idx] || ANSWER_OPTIONS[idx]
+                              : ANSWER_OPTIONS[idx];
+                          const isCorrect =
+                            (activeQType === 'abcd' ||
+                              activeQType === 'true_false') &&
+                            idx === activeQuizQuestion.correctIndex;
+                          const ansImg = activeQuizQuestion.answerImages?.[idx];
+                          const distCount =
+                            hostStatus === 'LEADERBOARD' &&
+                            leaderboardData?.distribution
+                              ? leaderboardData.distribution[idx]
+                              : null;
 
-                      return (
-                        <div
-                          key={idx}
-                          className={cn(
-                            'flex flex-col gap-2 rounded-base border-2 border-border p-3',
-                            isCorrect ? 'bg-main shadow-shadow' : 'bg-secondary-background'
-                          )}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <Badge variant={opt.badgeVariant} className="flex-shrink-0">
-                                {opt.label}
-                              </Badge>
-                              <span className="font-heading text-sm font-bold truncate">
-                                {ans || (ansImg ? `Zdjęcie ${opt.label}` : '')}
+                          return (
+                            <div
+                              key={idx}
+                              className={cn(
+                                'flex flex-col gap-2 rounded-base border-2 border-border p-3',
+                                isCorrect
+                                  ? 'bg-main shadow-shadow'
+                                  : 'bg-secondary-background'
+                              )}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <Badge
+                                    variant={opt.badgeVariant}
+                                    className="flex-shrink-0"
+                                  >
+                                    {activeQType === 'true_false'
+                                      ? opt.symbol
+                                      : opt.label}
+                                  </Badge>
+                                  <span className="font-heading text-sm font-bold truncate">
+                                    {ans || (ansImg ? `Zdjęcie ${opt.label}` : '')}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                  {distCount !== null && (
+                                    <Badge variant="neutral" className="tabular-nums">
+                                      {distCount}
+                                    </Badge>
+                                  )}
+                                  {isCorrect && (
+                                    <Badge variant="warning">✓ Poprawna</Badge>
+                                  )}
+                                </div>
+                              </div>
+                              {ansImg && (
+                                <div className="flex h-24 w-full items-center justify-center rounded-base border-2 border-border bg-background p-1 overflow-hidden">
+                                  <img
+                                    src={ansImg}
+                                    alt={`Zdjęcie odpowiedzi ${opt.label}`}
+                                    className="max-h-full max-w-full object-contain"
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                  {/* ANKIETA: wyniki kołowe w fazie LEADERBOARD */}
+                  {activeQType === 'poll' &&
+                    hostStatus === 'LEADERBOARD' &&
+                    leaderboardData?.distribution && (
+                      <PieChart
+                        distribution={leaderboardData.distribution}
+                        answers={activeQuizQuestion.answers}
+                        answerImages={activeQuizQuestion.answerImages}
+                        compact
+                      />
+                    )}
+
+                  {/* SLIDER: podgląd przedziału lub wyniki */}
+                  {activeQType === 'slider' &&
+                    (hostStatus === 'LEADERBOARD' &&
+                    leaderboardData?.sliderStats ? (
+                      <SliderResults
+                        sliderStats={leaderboardData.sliderStats}
+                        scored={activeQScored}
+                        compact
+                      />
+                    ) : (
+                      <div className="rounded-base border-2 border-border bg-secondary-background p-4 flex flex-wrap items-center justify-between gap-3 text-sm font-heading font-bold">
+                        <span>
+                          Przedział: {activeQuizQuestion.sliderMin} –{' '}
+                          {activeQuizQuestion.sliderMax}{' '}
+                          {activeQuizQuestion.sliderUnit || ''} (krok{' '}
+                          {activeQuizQuestion.sliderStep})
+                        </span>
+                        {activeQScored && (
+                          <Badge variant="default">
+                            Cel: {activeQuizQuestion.sliderCorrect}
+                            {activeQuizQuestion.sliderTolerance > 0
+                              ? ` (±${activeQuizQuestion.sliderTolerance})`
+                              : ''}{' '}
+                            {activeQuizQuestion.sliderUnit || ''}
+                          </Badge>
+                        )}
+                      </div>
+                    ))}
+
+                  {/* CHMURA SŁÓW: info lub wyniki */}
+                  {activeQType === 'word_cloud' &&
+                    (hostStatus === 'LEADERBOARD' &&
+                    leaderboardData?.wordCloud ? (
+                      <WordCloud
+                        entries={leaderboardData.wordCloud}
+                        totalResponses={leaderboardData.totalResponses}
+                        uniqueCount={leaderboardData.uniqueCount}
+                        compact
+                      />
+                    ) : (
+                      <div className="rounded-base border-2 border-border bg-secondary-background p-4 text-sm text-foreground/80">
+                        Uczestnicy wpisują hasła (maks.{' '}
+                        <strong>{activeQuizQuestion.maxLength || 32}</strong>{' '}
+                        znaków). Chmura słów pojawi się po zakończeniu czasu.
+                      </div>
+                    ))}
+
+                  {/* Top 5 w fazie LEADERBOARD (tylko dla pytań punktowanych) */}
+                  {hostStatus === 'LEADERBOARD' &&
+                    leaderboardData?.scored !== false &&
+                    leaderboardData?.topPlayers?.length > 0 && (
+                      <div className="border-t-2 border-border pt-4 space-y-2.5">
+                        <div className="text-xs font-heading font-bold uppercase tracking-wide text-foreground/75">
+                          Aktualne Top 5
+                        </div>
+                        <div className="space-y-2">
+                          {leaderboardData.topPlayers.map((p, idx) => (
+                            <div
+                              key={p.nickname}
+                              className={cn(
+                                'flex items-center justify-between rounded-base border-2 border-border px-3.5 py-2 text-sm',
+                                idx === 0 ? 'bg-main' : 'bg-background'
+                              )}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <Badge variant="neutral">#{idx + 1}</Badge>
+                                <span className="font-heading font-bold truncate">
+                                  @{p.nickname}
+                                </span>
+                              </div>
+                              <span className="font-heading font-extrabold tabular-nums">
+                                {p.score} pkt
                               </span>
                             </div>
-                            <div className="flex items-center gap-1.5 flex-shrink-0">
-                              {distCount !== null && (
-                                <Badge variant="neutral" className="tabular-nums">
-                                  {distCount}
-                                </Badge>
-                              )}
-                              {isCorrect && <Badge variant="warning">✓ Poprawna</Badge>}
-                            </div>
-                          </div>
-                          {ansImg && (
-                            <div className="flex h-24 w-full items-center justify-center rounded-base border-2 border-border bg-background p-1 overflow-hidden">
-                              <img
-                                src={ansImg}
-                                alt={`Zdjęcie odpowiedzi ${opt.label}`}
-                                className="max-h-full max-w-full object-contain"
-                              />
-                            </div>
-                          )}
+                          ))}
                         </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Top 5 w fazie LEADERBOARD */}
-                  {hostStatus === 'LEADERBOARD' && leaderboardData?.topPlayers && (
-                    <div className="border-t-2 border-border pt-4 space-y-2.5">
-                      <div className="text-xs font-heading font-bold uppercase tracking-wide text-foreground/75">
-                        Aktualne Top 5
                       </div>
-                      <div className="space-y-2">
-                        {leaderboardData.topPlayers.map((p, idx) => (
+                    )}
+                </CardContent>
+              </Card>
+            )}
+
+          {/* PODSUMOWANIE KOŃCOWE (PODIUM lub OPINIE) */}
+          {hostStatus === 'PODIUM' && (
+            <Card key="panel-podium" className="animate-screen-enter">
+              {isOpinionEnd ? (
+                <>
+                  <CardHeader>
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle>Podsumowanie sesji opinii</CardTitle>
+                      <Badge variant="info" className="tabular-nums">
+                        {(sessionEndMeta?.questionSummaries || []).length} pytań
+                      </Badge>
+                    </div>
+                    <CardDescription>
+                      Zebrane wyniki ze wszystkich rund sesji niepunktowanej.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {(sessionEndMeta?.questionSummaries || []).length === 0 ? (
+                      <div className="rounded-base border-2 border-border bg-background p-6 text-center text-sm text-foreground/75">
+                        Brak zapisanych podsumowań rund.
+                      </div>
+                    ) : (
+                      <div className="max-h-96 overflow-y-auto space-y-3 pr-1">
+                        {sessionEndMeta.questionSummaries.map((item) => {
+                          const tMeta =
+                            QUESTION_TYPES[item.type] || QUESTION_TYPES.poll;
+                          return (
+                            <div
+                              key={item.qIndex}
+                              className="rounded-base border-2 border-border bg-background p-3.5 space-y-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Badge variant="neutral">
+                                    #{item.qIndex + 1}
+                                  </Badge>
+                                  <Badge variant={tMeta.badgeVariant}>
+                                    {tMeta.shortLabel}
+                                  </Badge>
+                                </div>
+                                <Badge variant="neutral" className="tabular-nums">
+                                  {item.totalResponses} odp.
+                                </Badge>
+                              </div>
+                              <div className="font-heading text-sm font-bold">
+                                {item.content}
+                              </div>
+                              {item.type === 'slider' && (
+                                <div className="text-xs font-heading font-bold text-foreground/80">
+                                  Średnia: {item.avg ?? '—'}{' '}
+                                  {item.sliderUnit || ''} • Mediana:{' '}
+                                  {item.median ?? '—'} {item.sliderUnit || ''}
+                                </div>
+                              )}
+                              {item.type === 'word_cloud' &&
+                                item.topWords?.length > 0 && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {item.topWords.map((w) => (
+                                      <Badge key={w.word} variant="neutral">
+                                        {w.word} (×{w.count})
+                                      </Badge>
+                                    ))}
+                                  </div>
+                                )}
+                              {item.type === 'poll' &&
+                                Array.isArray(item.distribution) && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {item.distribution.map((c, i) => {
+                                      const tot = item.distribution.reduce(
+                                        (a, b) => a + b,
+                                        0
+                                      );
+                                      const pct =
+                                        tot > 0
+                                          ? Math.round((c / tot) * 100)
+                                          : 0;
+                                      return (
+                                        <Badge
+                                          key={i}
+                                          variant={
+                                            ANSWER_OPTIONS[i]?.badgeVariant ||
+                                            'neutral'
+                                          }
+                                        >
+                                          {ANSWER_OPTIONS[i]?.label}: {pct}% ({c})
+                                        </Badge>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </CardContent>
+                </>
+              ) : (
+                <>
+                  <CardHeader>
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle>Pełna klasyfikacja końcowa</CardTitle>
+                      <Badge variant="default" className="tabular-nums">
+                        {allResults.length} wyników
+                      </Badge>
+                    </div>
+                    <CardDescription>
+                      Kompletna lista wszystkich uczestników posortowana według zdobytych punktów.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {allResults.length === 0 ? (
+                      <div className="rounded-base border-2 border-border bg-background p-6 text-center text-sm text-foreground/75">
+                        Brak wyników do wyświetlenia.
+                      </div>
+                    ) : (
+                      <div className="max-h-96 overflow-y-auto rounded-base border-2 border-border bg-background p-3 space-y-2">
+                        {allResults.map((p) => (
                           <div
                             key={p.nickname}
                             className={cn(
-                              'flex items-center justify-between rounded-base border-2 border-border px-3.5 py-2 text-sm',
-                              idx === 0 ? 'bg-main' : 'bg-background'
+                              'flex items-center justify-between gap-3 rounded-base border-2 border-border px-3.5 py-2.5',
+                              p.place === 1
+                                ? 'bg-main'
+                                : 'bg-secondary-background'
                             )}
                           >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <Badge variant="neutral">#{idx + 1}</Badge>
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <Badge
+                                variant={
+                                  p.place === 1
+                                    ? 'warning'
+                                    : p.place === 2
+                                    ? 'info'
+                                    : p.place === 3
+                                    ? 'purple'
+                                    : 'neutral'
+                                }
+                                className="min-w-[2.5rem] tabular-nums"
+                              >
+                                #{p.place}
+                              </Badge>
                               <span className="font-heading font-bold truncate">
                                 @{p.nickname}
                               </span>
                             </div>
-                            <span className="font-heading font-extrabold tabular-nums">
+                            <span className="font-heading font-extrabold tabular-nums flex-shrink-0">
                               {p.score} pkt
                             </span>
                           </div>
                         ))}
                       </div>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-
-          {/* PEŁNA TABELA WYNIKÓW NA KONIEC QUIZU (PODGLĄD PROWADZĄCEGO) */}
-          {hostStatus === 'PODIUM' && (
-            <Card key="panel-podium" className="animate-screen-enter">
-              <CardHeader>
-                <div className="flex items-center justify-between gap-2">
-                  <CardTitle>Pełna klasyfikacja końcowa</CardTitle>
-                  <Badge variant="default" className="tabular-nums">
-                    {allResults.length} wyników
-                  </Badge>
-                </div>
-                <CardDescription>
-                  Kompletna lista wszystkich uczestników posortowana według zdobytych punktów.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {allResults.length === 0 ? (
-                  <div className="rounded-base border-2 border-border bg-background p-6 text-center text-sm text-foreground/75">
-                    Brak wyników do wyświetlenia.
-                  </div>
-                ) : (
-                  <div className="max-h-96 overflow-y-auto rounded-base border-2 border-border bg-background p-3 space-y-2">
-                    {allResults.map((p) => (
-                      <div
-                        key={p.nickname}
-                        className={cn(
-                          'flex items-center justify-between gap-3 rounded-base border-2 border-border px-3.5 py-2.5',
-                          p.place === 1 ? 'bg-main' : 'bg-secondary-background'
-                        )}
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <Badge
-                            variant={
-                              p.place === 1
-                                ? 'warning'
-                                : p.place === 2
-                                ? 'info'
-                                : p.place === 3
-                                ? 'purple'
-                                : 'neutral'
-                            }
-                            className="min-w-[2.5rem] tabular-nums"
-                          >
-                            #{p.place}
-                          </Badge>
-                          <span className="font-heading font-bold truncate">
-                            @{p.nickname}
-                          </span>
-                        </div>
-                        <span className="font-heading font-extrabold tabular-nums flex-shrink-0">
-                          {p.score} pkt
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
+                    )}
+                  </CardContent>
+                </>
+              )}
             </Card>
           )}
         </div>
