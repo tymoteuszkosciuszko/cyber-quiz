@@ -1,11 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Badge, Button, cn } from './components/ui';
-import { BACKEND_URL, socket } from './constants';
+import {
+  BACKEND_URL,
+  createEmptyQuestion,
+  createQuestionUid,
+  socket,
+} from './constants';
 import { GameScreenView } from './components/GameScreenView';
 import { HostControlPanel } from './components/HostControlPanel';
 import { PlayerView } from './components/PlayerView';
 import { AdminMenu } from './components/AdminMenu';
 import { QuizEditor } from './components/QuizEditor';
+import { isValidImageValue } from './utils/imageUtils';
 
 // ════════════════════════════════════════════════════
 // Routing:
@@ -38,8 +44,8 @@ function MainApp() {
   const [quizzes, setQuizzes] = useState([]);
   const [selectedQuizId, setSelectedQuizId] = useState('default-cyber-quiz');
   const [editorTitle, setEditorTitle] = useState('');
-  const [editorQuestions, setEditorQuestions] = useState([
-    { content: '', timeLimit: 20, answers: ['', '', '', ''], correctIndex: 0 },
+  const [editorQuestions, setEditorQuestions] = useState(() => [
+    createEmptyQuestion(),
   ]);
   const [editingQuizId, setEditingQuizId] = useState(null);
   const importFileRef = useRef(null);
@@ -379,9 +385,7 @@ function MainApp() {
   const openNewQuizEditor = () => {
     setEditingQuizId(null);
     setEditorTitle('');
-    setEditorQuestions([
-      { content: '', timeLimit: 20, answers: ['', '', '', ''], correctIndex: 0 },
-    ]);
+    setEditorQuestions([createEmptyQuestion()]);
     setMode('EDITOR');
   };
 
@@ -395,9 +399,12 @@ function MainApp() {
       setEditorTitle(quiz.title);
       setEditorQuestions(
         quiz.questions.map((q) => ({
-          content: q.content,
+          _uid: createQuestionUid(),
+          content: q.content || '',
+          image: q.image || null,
           timeLimit: q.timeLimit,
           answers: [...q.answers],
+          answerImages: q.answers.map((_, idx) => q.answerImages?.[idx] || null),
           correctIndex: q.correctIndex,
         }))
       );
@@ -417,10 +424,26 @@ function MainApp() {
         : `${BACKEND_URL}/api/quizzes`;
       const method = isEditing ? 'PUT' : 'POST';
 
+      const payloadQuestions = editorQuestions.map((q) => {
+        const clean = {
+          content: q.content || '',
+          timeLimit: q.timeLimit,
+          answers: [...q.answers],
+          correctIndex: q.correctIndex,
+        };
+        if (q.image) {
+          clean.image = q.image;
+        }
+        if (Array.isArray(q.answerImages) && q.answerImages.some(Boolean)) {
+          clean.answerImages = q.answers.map((_, idx) => q.answerImages[idx] || null);
+        }
+        return clean;
+      });
+
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: editorTitle, questions: editorQuestions }),
+        body: JSON.stringify({ title: editorTitle, questions: payloadQuestions }),
       });
       if (res.ok) {
         const saved = await res.json();
@@ -428,6 +451,9 @@ function MainApp() {
         setEditingQuizId(null);
         setMode('MENU');
         fetchQuizzes();
+      } else {
+        const errBody = await res.json().catch(() => ({}));
+        alert(`Nie udało się zapisać quizu: ${errBody.error || res.statusText}`);
       }
     } catch (_err) {
       alert('Błąd zapisu quizu');
@@ -456,7 +482,7 @@ function MainApp() {
         title: quiz.title,
         questions: quiz.questions,
         exportedAt: new Date().toISOString(),
-        version: '1.0',
+        version: '1.1',
       };
       const blob = new Blob([JSON.stringify(exportData, null, 2)], {
         type: 'application/json',
@@ -492,8 +518,19 @@ function MainApp() {
         throw new Error('Nieprawidłowy format pliku JSON');
       }
       for (const q of data.questions) {
-        if (!q.content || !Array.isArray(q.answers) || q.answers.length < 2) {
+        const hasQuestionContent =
+          (typeof q.content === 'string' && q.content.trim().length > 0) ||
+          isValidImageValue(q.image);
+        if (!hasQuestionContent || !Array.isArray(q.answers) || q.answers.length < 2) {
           throw new Error('Nieprawidłowa struktura pytań w pliku');
+        }
+        const allAnswersValid = q.answers.every(
+          (ans, idx) =>
+            (typeof ans === 'string' && ans.trim().length > 0) ||
+            isValidImageValue(q.answerImages?.[idx])
+        );
+        if (!allAnswersValid) {
+          throw new Error('Każda odpowiedź musi zawierać tekst lub zdjęcie');
         }
         if (q.correctIndex === undefined || q.correctIndex < 0) {
           throw new Error('Brak oznaczenia poprawnej odpowiedzi');
@@ -509,6 +546,9 @@ function MainApp() {
         setSelectedQuizId(saved.id);
         fetchQuizzes();
         alert('Quiz zaimportowany pomyślnie!');
+      } else {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || res.statusText);
       }
     } catch (err) {
       alert(`Błąd importu: ${err.message}`);

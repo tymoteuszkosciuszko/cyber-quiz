@@ -22,7 +22,7 @@ const REDIS_PORT = Number(process.env.REDIS_PORT) || 6379;
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors({ origin: CORS_ORIGIN }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 const httpServer = createServer(app);
 
@@ -30,6 +30,7 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: CORS_ORIGIN },
   perMessageDeflate: false,
+  maxHttpBufferSize: 15e6,
   pingInterval: 25000,
   pingTimeout: 20000,
 });
@@ -110,6 +111,100 @@ quizzes.set(defaultQuizId, {
 const roomTimers = new Map();
 
 // ==========================================
+// WALIDACJA I NORMALIZACJA PYTAŃ (W TYM ZDJĘĆ)
+// ==========================================
+
+const MAX_IMAGE_STR_LENGTH = 3_500_000;
+
+function sanitizeImageValue(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_IMAGE_STR_LENGTH) return null;
+  const isDataUrl =
+    /^data:image\/(png|jpeg|jpg|webp|gif|avif|svg\+xml);base64,[A-Za-z0-9+/=]+$/i.test(
+      trimmed
+    );
+  const isHttpUrl = /^https?:\/\/.+/i.test(trimmed);
+  return isDataUrl || isHttpUrl ? trimmed : null;
+}
+
+function normalizeAndValidateQuestions(rawQuestions) {
+  if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
+    return { error: 'INVALID_PAYLOAD' };
+  }
+
+  const normalized = [];
+  for (const raw of rawQuestions) {
+    if (!raw || typeof raw !== 'object') {
+      return { error: 'INVALID_QUESTION' };
+    }
+
+    const content = typeof raw.content === 'string' ? raw.content.trim() : '';
+    const image = sanitizeImageValue(raw.image);
+
+    if (!content && !image) {
+      return { error: 'EMPTY_QUESTION' };
+    }
+
+    if (
+      !Array.isArray(raw.answers) ||
+      raw.answers.length < 2 ||
+      raw.answers.length > 4
+    ) {
+      return { error: 'INVALID_ANSWERS' };
+    }
+
+    const answers = raw.answers.map((a) =>
+      typeof a === 'string' ? a.trim() : ''
+    );
+    const rawAnswerImages = Array.isArray(raw.answerImages)
+      ? raw.answerImages
+      : [];
+    const answerImages = answers.map((_, idx) =>
+      sanitizeImageValue(rawAnswerImages[idx])
+    );
+
+    for (let i = 0; i < answers.length; i++) {
+      if (!answers[i] && !answerImages[i]) {
+        return { error: 'EMPTY_ANSWER' };
+      }
+    }
+
+    const correctIndex = Number(raw.correctIndex);
+    if (
+      !Number.isInteger(correctIndex) ||
+      correctIndex < 0 ||
+      correctIndex >= answers.length
+    ) {
+      return { error: 'INVALID_CORRECT_INDEX' };
+    }
+
+    const rawTime = Number(raw.timeLimit);
+    const timeLimit = Number.isFinite(rawTime)
+      ? Math.min(120, Math.max(5, Math.round(rawTime)))
+      : 20;
+
+    const questionObj = {
+      content,
+      timeLimit,
+      answers,
+      correctIndex,
+    };
+
+    if (image) {
+      questionObj.image = image;
+    }
+    if (answerImages.some(Boolean)) {
+      questionObj.answerImages = answerImages;
+    }
+
+    normalized.push(questionObj);
+  }
+
+  return { questions: normalized };
+}
+
+// ==========================================
 // REST API — EDYTOR QUIZÓW
 // ==========================================
 
@@ -118,6 +213,11 @@ app.get('/api/quizzes', (_req, res) => {
     id: q.id,
     title: q.title,
     questionsCount: q.questions.length,
+    hasImages: q.questions.some(
+      (item) =>
+        Boolean(item.image) ||
+        (Array.isArray(item.answerImages) && item.answerImages.some(Boolean))
+    ),
   }));
   res.json(list);
 });
@@ -129,12 +229,16 @@ app.get('/api/quizzes/:id', (req, res) => {
 });
 
 app.post('/api/quizzes', (req, res) => {
-  const { title, questions } = req.body;
-  if (!title || !Array.isArray(questions) || questions.length === 0) {
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  if (!title) {
     return res.status(400).json({ error: 'INVALID_PAYLOAD' });
   }
+  const result = normalizeAndValidateQuestions(req.body?.questions);
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
   const id = uuidv4();
-  const newQuiz = { id, title, questions };
+  const newQuiz = { id, title, questions: result.questions };
   quizzes.set(id, newQuiz);
   res.status(201).json(newQuiz);
 });
@@ -144,11 +248,15 @@ app.put('/api/quizzes/:id', (req, res) => {
   if (!quizzes.has(req.params.id)) {
     return res.status(404).json({ error: 'QUIZ_NOT_FOUND' });
   }
-  const { title, questions } = req.body;
-  if (!title || !Array.isArray(questions) || questions.length === 0) {
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  if (!title) {
     return res.status(400).json({ error: 'INVALID_PAYLOAD' });
   }
-  const updated = { id: req.params.id, title, questions };
+  const result = normalizeAndValidateQuestions(req.body?.questions);
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  const updated = { id: req.params.id, title, questions: result.questions };
   quizzes.set(req.params.id, updated);
   res.json(updated);
 });
@@ -283,6 +391,7 @@ async function buildRoomSnapshot(pin) {
         qIndex,
         totalQuestions: quiz.questions.length,
         content: question.content,
+        image: question.image || null,
         timeLimit: question.timeLimit,
         totalPlayers,
         previewDuration: QUESTION_PREVIEW_SECONDS,
@@ -300,7 +409,9 @@ async function buildRoomSnapshot(pin) {
         qIndex,
         totalQuestions: quiz.questions.length,
         content: question.content,
+        image: question.image || null,
         answers: question.answers,
+        answerImages: question.answerImages || [],
         timeLimit: question.timeLimit,
         totalPlayers,
       },
@@ -326,7 +437,9 @@ async function buildRoomSnapshot(pin) {
         qIndex,
         totalQuestions: quiz.questions.length,
         content: question.content,
+        image: question.image || null,
         answers: question.answers,
+        answerImages: question.answerImages || [],
         timeLimit: question.timeLimit,
         totalPlayers,
       },
@@ -388,6 +501,7 @@ async function startQuestionPreview(pin, qIndex) {
     qIndex,
     totalQuestions: quiz.questions.length,
     content: question.content,
+    image: question.image || null,
     timeLimit: question.timeLimit,
     totalPlayers,
     previewDuration: QUESTION_PREVIEW_SECONDS,
@@ -448,7 +562,9 @@ async function revealAnswersAndStartQuestion(pin, qIndex) {
     qIndex,
     totalQuestions: quiz.questions.length,
     content: question.content,
+    image: question.image || null,
     answers: question.answers,
+    answerImages: question.answerImages || [],
     timeLimit: question.timeLimit,
     totalPlayers,
   });

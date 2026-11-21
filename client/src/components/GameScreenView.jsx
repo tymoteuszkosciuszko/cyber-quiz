@@ -498,26 +498,63 @@ export function GameScreenView({ pin }) {
                 </div>
 
                 {/* Treść pytania — płynnie dopasowuje rozmiar między podglądem a ujawnieniem odpowiedzi */}
-                <h1
-                  className={cn(
-                    'font-heading font-extrabold text-center leading-tight transition-all duration-300',
-                    status === 'QUESTION_PREVIEW'
-                      ? 'text-3xl md:text-5xl py-8'
-                      : 'text-2xl md:text-4xl py-3'
-                  )}
-                >
-                  {currentQuestion.content}
-                </h1>
+                {currentQuestion.content && (
+                  <h1
+                    className={cn(
+                      'font-heading font-extrabold text-center leading-tight transition-all duration-300',
+                      status === 'QUESTION_PREVIEW'
+                        ? currentQuestion.image
+                          ? 'text-2xl md:text-4xl py-2'
+                          : 'text-3xl md:text-5xl py-8'
+                        : currentQuestion.image
+                        ? 'text-xl md:text-3xl py-1'
+                        : 'text-2xl md:text-4xl py-3'
+                    )}
+                  >
+                    {currentQuestion.content}
+                  </h1>
+                )}
+
+                {/* Zdjęcie do pytania (widoczne w podglądzie oraz podczas odpowiadania) */}
+                {currentQuestion.image && (
+                  <div className="flex justify-center animate-slide-up">
+                    <div className="inline-flex items-center justify-center rounded-base border-2 border-border bg-background p-2 shadow-shadow max-w-full">
+                      <img
+                        src={currentQuestion.image}
+                        alt="Ilustracja do pytania"
+                        className={cn(
+                          'w-auto max-w-full rounded-[3px] object-contain transition-all duration-300',
+                          status === 'QUESTION_PREVIEW'
+                            ? 'max-h-[38vh]'
+                            : Array.isArray(currentQuestion.answerImages) &&
+                              currentQuestion.answerImages.some(Boolean)
+                            ? 'max-h-[24vh]'
+                            : 'max-h-[34vh]'
+                        )}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {/* FAZA 1: Odliczanie do ujawnienia odpowiedzi */}
                 {status === 'QUESTION_PREVIEW' && (
-                  <div className="mx-auto max-w-xl rounded-base border-2 border-border bg-background p-6 text-center space-y-4 animate-slide-up">
+                  <div
+                    className={cn(
+                      'mx-auto max-w-xl rounded-base border-2 border-border bg-background text-center animate-slide-up',
+                      currentQuestion.image ? 'p-4 space-y-2.5' : 'p-6 space-y-4'
+                    )}
+                  >
                     <div className="text-sm font-heading font-bold uppercase tracking-wide text-foreground/75">
                       Odpowiedzi pojawią się za
                     </div>
                     <div
                       key={`preview-sec-${previewWholeSeconds}`}
-                      className="mx-auto flex h-24 w-24 items-center justify-center rounded-base border-2 border-border bg-warning text-foreground shadow-shadow font-heading text-5xl font-extrabold tabular-nums animate-countdown-pop"
+                      className={cn(
+                        'mx-auto flex items-center justify-center rounded-base border-2 border-border bg-warning text-foreground shadow-shadow font-heading font-extrabold tabular-nums animate-countdown-pop',
+                        currentQuestion.image
+                          ? 'h-16 w-16 text-4xl'
+                          : 'h-24 w-24 text-5xl'
+                      )}
                     >
                       {previewWholeSeconds}
                     </div>
@@ -528,32 +565,75 @@ export function GameScreenView({ pin }) {
                 )}
 
                 {/* FAZA 2: Ujawnione odpowiedzi (kaskadowa animacja) */}
-                {status === 'QUESTION' && Array.isArray(currentQuestion.answers) && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-5 pb-1 pr-1">
-                    {currentQuestion.answers.map((ans, idx) => {
-                      const opt = ANSWER_OPTIONS[idx];
-                      return (
-                        <div
-                          key={idx}
-                          style={{ animationDelay: `${idx * 75}ms` }}
-                          className="flex items-center gap-4 rounded-base border-2 border-border bg-secondary-background p-5 shadow-shadow animate-answer-reveal"
-                        >
-                          <span
-                            className={cn(
-                              'flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-xl font-extrabold text-foreground',
-                              opt.bgClass
-                            )}
+                {status === 'QUESTION' && Array.isArray(currentQuestion.answers) && (() => {
+                  const hasAnyAnswerImages =
+                    Array.isArray(currentQuestion.answerImages) &&
+                    currentQuestion.answerImages.some(Boolean);
+
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-5 pb-1 pr-1">
+                      {currentQuestion.answers.map((ans, idx) => {
+                        const opt = ANSWER_OPTIONS[idx];
+                        const ansImg = currentQuestion.answerImages?.[idx];
+
+                        if (hasAnyAnswerImages) {
+                          return (
+                            <div
+                              key={idx}
+                              style={{ animationDelay: `${idx * 75}ms` }}
+                              className="flex flex-col gap-3 rounded-base border-2 border-border bg-secondary-background p-4 shadow-shadow animate-answer-reveal"
+                            >
+                              <div className="flex items-center gap-3">
+                                <span
+                                  className={cn(
+                                    'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-lg font-extrabold text-foreground',
+                                    opt.bgClass
+                                  )}
+                                >
+                                  {opt.label}
+                                </span>
+                                {ans && (
+                                  <span className="font-heading text-lg md:text-xl font-bold leading-snug">
+                                    {ans}
+                                  </span>
+                                )}
+                              </div>
+                              {ansImg && (
+                                <div className="flex h-36 md:h-44 w-full items-center justify-center rounded-base border-2 border-border bg-background p-1.5 overflow-hidden">
+                                  <img
+                                    src={ansImg}
+                                    alt={`Odpowiedź ${opt.label}`}
+                                    className="max-h-full max-w-full object-contain"
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div
+                            key={idx}
+                            style={{ animationDelay: `${idx * 75}ms` }}
+                            className="flex items-center gap-4 rounded-base border-2 border-border bg-secondary-background p-5 shadow-shadow animate-answer-reveal"
                           >
-                            {opt.label}
-                          </span>
-                          <span className="font-heading text-xl md:text-2xl font-bold leading-snug">
-                            {ans}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                            <span
+                              className={cn(
+                                'flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-xl font-extrabold text-foreground',
+                                opt.bgClass
+                              )}
+                            >
+                              {opt.label}
+                            </span>
+                            <span className="font-heading text-xl md:text-2xl font-bold leading-snug">
+                              {ans}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </Card>
             )}
 
@@ -592,9 +672,18 @@ export function GameScreenView({ pin }) {
                 >
                   {ANSWER_OPTIONS[leaderboardData.correctIndex]?.label}
                 </Badge>
-                <strong className="font-heading text-base md:text-lg font-extrabold">
-                  {currentQuestion?.answers?.[leaderboardData.correctIndex]}
-                </strong>
+                {currentQuestion?.answers?.[leaderboardData.correctIndex] && (
+                  <strong className="font-heading text-base md:text-lg font-extrabold">
+                    {currentQuestion.answers[leaderboardData.correctIndex]}
+                  </strong>
+                )}
+                {currentQuestion?.answerImages?.[leaderboardData.correctIndex] && (
+                  <img
+                    src={currentQuestion.answerImages[leaderboardData.correctIndex]}
+                    alt={`Poprawna odpowiedź ${ANSWER_OPTIONS[leaderboardData.correctIndex]?.label || ''}`}
+                    className="h-16 md:h-20 w-auto max-w-[180px] rounded-base border-2 border-border bg-secondary-background object-contain p-1"
+                  />
+                )}
               </Alert>
 
               {/* Rozkład odpowiedzi z płynnym wzrostem słupków */}

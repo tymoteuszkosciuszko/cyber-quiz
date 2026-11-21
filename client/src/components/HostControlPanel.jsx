@@ -380,9 +380,18 @@ export function HostControlPanel({
                         >
                           {isDone ? '✓' : `#${idx + 1}`}
                         </Badge>
-                        <span className="line-clamp-2 leading-snug">
-                          {q.content}
+                        <span className="line-clamp-2 leading-snug flex-1 min-w-0">
+                          {q.content || '(Pytanie ze zdjęciem)'}
                         </span>
+                        {(q.image || q.answerImages?.some(Boolean)) && (
+                          <Badge
+                            variant="info"
+                            className="flex-shrink-0 text-[10px] px-1.5 py-0"
+                            title="Pytanie zawiera zdjęcia"
+                          >
+                            IMG
+                          </Badge>
+                        )}
                       </div>
                     );
                   })}
@@ -449,14 +458,28 @@ export function HostControlPanel({
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-5">
-                  <div className="rounded-base border-2 border-border bg-background p-4 font-heading text-lg font-extrabold leading-snug">
-                    {activeQuizQuestion.content}
+                  <div className="rounded-base border-2 border-border bg-background p-4 space-y-3">
+                    {activeQuizQuestion.content && (
+                      <div className="font-heading text-lg font-extrabold leading-snug">
+                        {activeQuizQuestion.content}
+                      </div>
+                    )}
+                    {activeQuizQuestion.image && (
+                      <div className="flex justify-center">
+                        <img
+                          src={activeQuizQuestion.image}
+                          alt="Zdjęcie do pytania"
+                          className="max-h-40 w-auto max-w-full rounded-base border-2 border-border bg-secondary-background object-contain p-1"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {activeQuizQuestion.answers.map((ans, idx) => {
                       const opt = ANSWER_OPTIONS[idx];
                       const isCorrect = idx === activeQuizQuestion.correctIndex;
+                      const ansImg = activeQuizQuestion.answerImages?.[idx];
                       const distCount =
                         hostStatus === 'LEADERBOARD' && leaderboardData?.distribution
                           ? leaderboardData.distribution[idx]
@@ -466,26 +489,37 @@ export function HostControlPanel({
                         <div
                           key={idx}
                           className={cn(
-                            'flex items-center justify-between gap-2 rounded-base border-2 border-border p-3',
+                            'flex flex-col gap-2 rounded-base border-2 border-border p-3',
                             isCorrect ? 'bg-main shadow-shadow' : 'bg-secondary-background'
                           )}
                         >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <Badge variant={opt.badgeVariant} className="flex-shrink-0">
-                              {opt.label}
-                            </Badge>
-                            <span className="font-heading text-sm font-bold truncate">
-                              {ans}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-1.5 flex-shrink-0">
-                            {distCount !== null && (
-                              <Badge variant="neutral" className="tabular-nums">
-                                {distCount}
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <Badge variant={opt.badgeVariant} className="flex-shrink-0">
+                                {opt.label}
                               </Badge>
-                            )}
-                            {isCorrect && <Badge variant="warning">✓ Poprawna</Badge>}
+                              <span className="font-heading text-sm font-bold truncate">
+                                {ans || (ansImg ? `Zdjęcie ${opt.label}` : '')}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              {distCount !== null && (
+                                <Badge variant="neutral" className="tabular-nums">
+                                  {distCount}
+                                </Badge>
+                              )}
+                              {isCorrect && <Badge variant="warning">✓ Poprawna</Badge>}
+                            </div>
                           </div>
+                          {ansImg && (
+                            <div className="flex h-24 w-full items-center justify-center rounded-base border-2 border-border bg-background p-1 overflow-hidden">
+                              <img
+                                src={ansImg}
+                                alt={`Zdjęcie odpowiedzi ${opt.label}`}
+                                className="max-h-full max-w-full object-contain"
+                              />
+                            </div>
+                          )}
                         </div>
                       );
                     })}
