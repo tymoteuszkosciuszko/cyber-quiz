@@ -1,0 +1,56 @@
+services:
+  cyber-quiz:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cyber-quiz:prod
+    container_name: cyber-quiz
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      REDIS_HOST: cyber-quiz-redis
+      REDIS_PORT: 6379
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    depends_on:
+      cyber-quiz-redis:
+        condition: service_healthy
+    networks:
+      - cyber-quiz-internal
+      - swag-proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cyber-quiz-redis:
+    image: redis:7-alpine
+    container_name: cyber-quiz-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cyber-quiz-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  cyber-quiz-internal:
+    driver: bridge
+    internal: true
+  swag-proxy:
+    name: ${SWAG_NETWORK:-swag}
+    external: true
