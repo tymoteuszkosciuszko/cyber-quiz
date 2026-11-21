@@ -192,6 +192,13 @@ function MainApp() {
     }
   }, [clearAuthState]);
 
+  const handleMfaCountChanged = useCallback((count) => {
+    setAuthUser((prev) => {
+      if (!prev || prev.mfaCredentialsCount === count) return prev;
+      return { ...prev, mfaCredentialsCount: count };
+    });
+  }, []);
+
   const isFullyAuthenticatedAdmin =
     isAdminRoute && Boolean(authUser) && authStatus === 'AUTHENTICATED';
 
@@ -1104,11 +1111,7 @@ function MainApp() {
             setAuthStatus('AUTHENTICATED');
             reconnectSocket();
           }}
-          onMfaCountChanged={(count) => {
-            setAuthUser((prev) =>
-              prev ? { ...prev, mfaCredentialsCount: count } : prev
-            );
-          }}
+          onMfaCountChanged={handleMfaCountChanged}
           onLoggedOutAll={clearAuthState}
         />
       )}

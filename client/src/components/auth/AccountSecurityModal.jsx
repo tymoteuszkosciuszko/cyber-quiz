@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   browserSupportsWebAuthn,
   startRegistration,
@@ -68,26 +68,40 @@ export function AccountSecurityModal({
   const [deletingKeyId, setDeletingKeyId] = useState(null);
   const [deletePassword, setDeletePassword] = useState('');
 
-  const fetchMfaCredentials = useCallback(async () => {
-    if (!isSuperAdmin) return;
-    setLoadingMfa(true);
-    try {
-      const { res, data } = await apiJson('/api/auth/mfa/credentials');
-      if (res.ok && Array.isArray(data.credentials)) {
-        setMfaCredentials(data.credentials);
-        if (data.enforcement) setMfaEnforcement(data.enforcement);
-        if (data.maxCredentials) setMaxCredentials(data.maxCredentials);
-        onMfaCountChanged?.(data.credentials.length);
+  const onMfaCountChangedRef = useRef(onMfaCountChanged);
+  useEffect(() => {
+    onMfaCountChangedRef.current = onMfaCountChanged;
+  }, [onMfaCountChanged]);
+
+  const fetchMfaCredentials = useCallback(
+    async ({ showLoading = false } = {}) => {
+      if (!isSuperAdmin) return;
+      if (showLoading) setLoadingMfa(true);
+      try {
+        const { res, data } = await apiJson('/api/auth/mfa/credentials');
+        if (res.ok && Array.isArray(data.credentials)) {
+          setMfaCredentials(data.credentials);
+          if (data.enforcement) setMfaEnforcement(data.enforcement);
+          if (data.maxCredentials) setMaxCredentials(data.maxCredentials);
+          onMfaCountChangedRef.current?.(data.credentials.length);
+        } else {
+          setMfaError(
+            data.message ||
+              data.error ||
+              'Nie udało się pobrać listy kluczy bezpieczeństwa.'
+          );
+        }
+      } catch {
+        setMfaError('Nie udało się pobrać listy kluczy bezpieczeństwa.');
+      } finally {
+        setLoadingMfa(false);
       }
-    } catch {
-      setMfaError('Nie udało się pobrać listy kluczy bezpieczeństwa.');
-    } finally {
-      setLoadingMfa(false);
-    }
-  }, [isSuperAdmin, onMfaCountChanged]);
+    },
+    [isSuperAdmin]
+  );
 
   useEffect(() => {
-    fetchMfaCredentials();
+    fetchMfaCredentials({ showLoading: true });
   }, [fetchMfaCredentials]);
 
   const handleChangePassword = async (e) => {
