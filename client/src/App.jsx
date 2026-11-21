@@ -2,8 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Badge, Button, cn } from './components/ui';
 import {
   BACKEND_URL,
+  QUIZ_MODES,
   createEmptyQuestion,
   createQuestionUid,
+  getAllowedQuestionTypes,
+  isQuestionScored,
   socket,
 } from './constants';
 import { GameScreenView } from './components/GameScreenView';
@@ -44,8 +47,9 @@ function MainApp() {
   const [quizzes, setQuizzes] = useState([]);
   const [selectedQuizId, setSelectedQuizId] = useState('default-cyber-quiz');
   const [editorTitle, setEditorTitle] = useState('');
+  const [editorMode, setEditorMode] = useState('quiz');
   const [editorQuestions, setEditorQuestions] = useState(() => [
-    createEmptyQuestion(),
+    createEmptyQuestion('abcd', 'quiz'),
   ]);
   const [editingQuizId, setEditingQuizId] = useState(null);
   const importFileRef = useRef(null);
@@ -65,6 +69,11 @@ function MainApp() {
   const [leaderboardData, setLeaderboardData] = useState(null);
   const [autoNextSeconds, setAutoNextSeconds] = useState(0);
   const [allResults, setAllResults] = useState([]);
+  const [sessionEndMeta, setSessionEndMeta] = useState({
+    sessionMode: 'quiz',
+    hasScoredQuestions: true,
+    questionSummaries: [],
+  });
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const screenWindowRef = useRef(null);
 
@@ -141,10 +150,24 @@ function MainApp() {
       setAutoNextSeconds(autoNextIn || 0);
     });
 
-    socket.on('host_podium', ({ podium, allResults: full }) => {
-      setHostStatus('PODIUM');
-      setAllResults(full || podium || []);
-    });
+    socket.on(
+      'host_podium',
+      ({
+        podium,
+        allResults: full,
+        sessionMode = 'quiz',
+        hasScoredQuestions = true,
+        questionSummaries = [],
+      }) => {
+        setHostStatus('PODIUM');
+        setAllResults(full || podium || []);
+        setSessionEndMeta({
+          sessionMode,
+          hasScoredQuestions,
+          questionSummaries,
+        });
+      }
+    );
 
     // Zdarzenia Gracza
     socket.on('player_countdown', ({ seconds }) => {
@@ -385,7 +408,8 @@ function MainApp() {
   const openNewQuizEditor = () => {
     setEditingQuizId(null);
     setEditorTitle('');
-    setEditorQuestions([createEmptyQuestion()]);
+    setEditorMode('quiz');
+    setEditorQuestions([createEmptyQuestion('abcd', 'quiz')]);
     setMode('EDITOR');
   };
 
@@ -393,24 +417,52 @@ function MainApp() {
   const openEditQuiz = async (quizId) => {
     try {
       const res = await fetch(`${BACKEND_URL}/api/quizzes/${quizId}`);
-      if (!res.ok) throw new Error('Nie znaleziono quizu');
+      if (!res.ok) throw new Error('Nie znaleziono zestawu');
       const quiz = await res.json();
+      const quizMode = QUIZ_MODES[quiz.mode] ? quiz.mode : 'quiz';
       setEditingQuizId(quiz.id);
       setEditorTitle(quiz.title);
+      setEditorMode(quizMode);
       setEditorQuestions(
-        quiz.questions.map((q) => ({
-          _uid: createQuestionUid(),
-          content: q.content || '',
-          image: q.image || null,
-          timeLimit: q.timeLimit,
-          answers: [...q.answers],
-          answerImages: q.answers.map((_, idx) => q.answerImages?.[idx] || null),
-          correctIndex: q.correctIndex,
-        }))
+        quiz.questions.map((q) => {
+          const type = q.type || 'abcd';
+          const base = {
+            _uid: createQuestionUid(),
+            type,
+            content: q.content || '',
+            image: q.image || null,
+            timeLimit: q.timeLimit || 20,
+            scored: isQuestionScored(q, quizMode),
+          };
+          if (type === 'abcd' || type === 'true_false' || type === 'poll') {
+            const answers = Array.isArray(q.answers)
+              ? [...q.answers]
+              : type === 'true_false'
+              ? ['Prawda', 'Fałsz']
+              : ['', '', '', ''];
+            base.answers = answers;
+            base.answerImages = answers.map((_, idx) => q.answerImages?.[idx] || null);
+            if (type === 'abcd' || type === 'true_false') {
+              base.correctIndex = q.correctIndex ?? 0;
+            }
+          } else if (type === 'slider') {
+            base.sliderMin = q.sliderMin ?? 0;
+            base.sliderMax = q.sliderMax ?? 100;
+            base.sliderStep = q.sliderStep ?? 1;
+            base.sliderUnit = q.sliderUnit || '';
+            if (base.scored) {
+              base.sliderCorrect = q.sliderCorrect ?? 50;
+              base.sliderTolerance = q.sliderTolerance ?? 0;
+            }
+          } else if (type === 'word_cloud') {
+            base.maxLength = q.maxLength ?? 32;
+          }
+          return base;
+        })
       );
       setMode('EDITOR');
     } catch (err) {
-      alert(`Błąd ładowania quizu: ${err.message}`);
+      alert(`Błąd ładowania zestawu: ${err.message}`);
     }
   };
 
@@ -425,17 +477,38 @@ function MainApp() {
       const method = isEditing ? 'PUT' : 'POST';
 
       const payloadQuestions = editorQuestions.map((q) => {
+        const type = q.type || 'abcd';
+        const scored = isQuestionScored(q, editorMode);
         const clean = {
+          type,
           content: q.content || '',
           timeLimit: q.timeLimit,
-          answers: [...q.answers],
-          correctIndex: q.correctIndex,
+          scored,
         };
         if (q.image) {
           clean.image = q.image;
         }
-        if (Array.isArray(q.answerImages) && q.answerImages.some(Boolean)) {
-          clean.answerImages = q.answers.map((_, idx) => q.answerImages[idx] || null);
+        if (type === 'abcd' || type === 'true_false' || type === 'poll') {
+          clean.answers = [...(q.answers || [])];
+          if (Array.isArray(q.answerImages) && q.answerImages.some(Boolean)) {
+            clean.answerImages = clean.answers.map(
+              (_, idx) => q.answerImages[idx] || null
+            );
+          }
+          if (type === 'abcd' || type === 'true_false') {
+            clean.correctIndex = q.correctIndex ?? 0;
+          }
+        } else if (type === 'slider') {
+          clean.sliderMin = Number(q.sliderMin);
+          clean.sliderMax = Number(q.sliderMax);
+          clean.sliderStep = Number(q.sliderStep);
+          clean.sliderUnit = q.sliderUnit || '';
+          if (scored) {
+            clean.sliderCorrect = Number(q.sliderCorrect);
+            clean.sliderTolerance = Number(q.sliderTolerance ?? 0);
+          }
+        } else if (type === 'word_cloud') {
+          clean.maxLength = Number(q.maxLength || 32);
         }
         return clean;
       });
@@ -443,7 +516,11 @@ function MainApp() {
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: editorTitle, questions: payloadQuestions }),
+        body: JSON.stringify({
+          title: editorTitle,
+          mode: editorMode,
+          questions: payloadQuestions,
+        }),
       });
       if (res.ok) {
         const saved = await res.json();
@@ -453,22 +530,22 @@ function MainApp() {
         fetchQuizzes();
       } else {
         const errBody = await res.json().catch(() => ({}));
-        alert(`Nie udało się zapisać quizu: ${errBody.error || res.statusText}`);
+        alert(`Nie udało się zapisać zestawu: ${errBody.error || res.statusText}`);
       }
     } catch (_err) {
-      alert('Błąd zapisu quizu');
+      alert('Błąd zapisu zestawu');
     }
   };
 
   // ─── Usuwanie quizu ───
   const deleteQuiz = async (quizId) => {
-    if (!confirm('Czy na pewno chcesz usunąć ten quiz?')) return;
+    if (!confirm('Czy na pewno chcesz usunąć ten zestaw?')) return;
     try {
       await fetch(`${BACKEND_URL}/api/quizzes/${quizId}`, { method: 'DELETE' });
       fetchQuizzes();
       if (selectedQuizId === quizId) setSelectedQuizId('default-cyber-quiz');
     } catch (_err) {
-      alert('Błąd usuwania quizu');
+      alert('Błąd usuwania zestawu');
     }
   };
 
@@ -480,9 +557,10 @@ function MainApp() {
       const quiz = await res.json();
       const exportData = {
         title: quiz.title,
+        mode: quiz.mode || 'quiz',
         questions: quiz.questions,
         exportedAt: new Date().toISOString(),
-        version: '1.1',
+        version: '2.0',
       };
       const blob = new Blob([JSON.stringify(exportData, null, 2)], {
         type: 'application/json',
@@ -510,6 +588,9 @@ function MainApp() {
     try {
       const text = await file.text();
       const data = JSON.parse(text);
+      const importMode = QUIZ_MODES[data.mode] ? data.mode : 'quiz';
+      const allowedTypes = getAllowedQuestionTypes(importMode);
+
       if (
         !data.title ||
         !Array.isArray(data.questions) ||
@@ -518,34 +599,58 @@ function MainApp() {
         throw new Error('Nieprawidłowy format pliku JSON');
       }
       for (const q of data.questions) {
+        const qType = q.type || 'abcd';
+        if (!allowedTypes.includes(qType)) {
+          throw new Error(`Nieobsługiwany typ pytania (${qType}) dla trybu ${importMode}`);
+        }
         const hasQuestionContent =
           (typeof q.content === 'string' && q.content.trim().length > 0) ||
           isValidImageValue(q.image);
-        if (!hasQuestionContent || !Array.isArray(q.answers) || q.answers.length < 2) {
-          throw new Error('Nieprawidłowa struktura pytań w pliku');
+        if (!hasQuestionContent) {
+          throw new Error('Każde pytanie musi zawierać treść lub zdjęcie');
         }
-        const allAnswersValid = q.answers.every(
-          (ans, idx) =>
-            (typeof ans === 'string' && ans.trim().length > 0) ||
-            isValidImageValue(q.answerImages?.[idx])
-        );
-        if (!allAnswersValid) {
-          throw new Error('Każda odpowiedź musi zawierać tekst lub zdjęcie');
-        }
-        if (q.correctIndex === undefined || q.correctIndex < 0) {
-          throw new Error('Brak oznaczenia poprawnej odpowiedzi');
+        if (qType === 'abcd' || qType === 'true_false' || qType === 'poll') {
+          if (!Array.isArray(q.answers) || q.answers.length < 2) {
+            throw new Error('Nieprawidłowa struktura odpowiedzi w pliku');
+          }
+          const allAnswersValid = q.answers.every(
+            (ans, idx) =>
+              (typeof ans === 'string' && ans.trim().length > 0) ||
+              isValidImageValue(q.answerImages?.[idx])
+          );
+          if (!allAnswersValid) {
+            throw new Error('Każda odpowiedź musi zawierać tekst lub zdjęcie');
+          }
+          if (
+            (qType === 'abcd' || qType === 'true_false') &&
+            (q.correctIndex === undefined || q.correctIndex < 0)
+          ) {
+            throw new Error('Brak oznaczenia poprawnej odpowiedzi');
+          }
+        } else if (qType === 'slider') {
+          if (
+            !Number.isFinite(Number(q.sliderMin)) ||
+            !Number.isFinite(Number(q.sliderMax)) ||
+            Number(q.sliderMax) <= Number(q.sliderMin)
+          ) {
+            throw new Error('Nieprawidłowy zakres dla pytania typu slider');
+          }
         }
       }
       const res = await fetch(`${BACKEND_URL}/api/quizzes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: data.title, questions: data.questions }),
+        body: JSON.stringify({
+          title: data.title,
+          mode: importMode,
+          questions: data.questions,
+        }),
       });
       if (res.ok) {
         const saved = await res.json();
         setSelectedQuizId(saved.id);
         fetchQuizzes();
-        alert('Quiz zaimportowany pomyślnie!');
+        alert('Zestaw zaimportowany pomyślnie!');
       } else {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || res.statusText);
@@ -572,11 +677,10 @@ function MainApp() {
     });
   };
 
-  const handleSubmitAnswer = (qIndex, answerIndex) => {
+  const handleSubmitAnswer = (answerPayload) => {
     socket.emit('submit_answer', {
       pin: playerPin,
-      qIndex,
-      answerIndex,
+      ...answerPayload,
     });
   };
 
@@ -678,6 +782,8 @@ function MainApp() {
             editingQuizId={editingQuizId}
             editorTitle={editorTitle}
             setEditorTitle={setEditorTitle}
+            editorMode={editorMode}
+            setEditorMode={setEditorMode}
             editorQuestions={editorQuestions}
             setEditorQuestions={setEditorQuestions}
             onSaveQuiz={saveQuiz}
@@ -701,6 +807,7 @@ function MainApp() {
             leaderboardData={leaderboardData}
             autoNextSeconds={autoNextSeconds}
             allResults={allResults}
+            sessionEndMeta={sessionEndMeta}
             onOpenGameScreen={() => openGameScreenWindow(roomPin)}
             onStartGame={() => socket.emit('host_start_game', { pin: roomPin })}
             onForceNext={() => socket.emit('host_force_next', { pin: roomPin })}

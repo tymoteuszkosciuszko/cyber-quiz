@@ -1,19 +1,23 @@
 import { useState, useEffect, useCallback } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
+import { Alert, Badge, Button, Card, Progress, cn } from './ui';
 import {
-  Alert,
-  Badge,
-  Button,
-  Card,
-  Progress,
-  cn,
-} from './ui';
-import { socket, ANSWER_OPTIONS } from '../constants';
+  ANSWER_OPTIONS,
+  QUESTION_TYPES,
+  QUIZ_MODES,
+  TRUE_FALSE_OPTIONS,
+  socket,
+} from '../constants';
+import { PieChart } from './results/PieChart';
+import { WordCloud } from './results/WordCloud';
+import { SliderResults } from './results/SliderResults';
 
 export function GameScreenView({ pin }) {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState('');
   const [quizTitle, setQuizTitle] = useState('');
+  const [sessionMode, setSessionMode] = useState('quiz');
+  const [hasScoredQuestions, setHasScoredQuestions] = useState(true);
   const [status, setStatus] = useState('LOADING');
   const [playersList, setPlayersList] = useState([]);
   const [countdownSeconds, setCountdownSeconds] = useState(0);
@@ -27,6 +31,7 @@ export function GameScreenView({ pin }) {
   const [barsAnimated, setBarsAnimated] = useState(false);
   const [podiumData, setPodiumData] = useState([]);
   const [allResults, setAllResults] = useState([]);
+  const [questionSummaries, setQuestionSummaries] = useState([]);
   const [revealedPodiumStep, setRevealedPodiumStep] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -40,6 +45,8 @@ export function GameScreenView({ pin }) {
     setError('');
     setConnected(true);
     setQuizTitle(snap.quizTitle || '');
+    setSessionMode(snap.sessionMode || 'quiz');
+    setHasScoredQuestions(snap.hasScoredQuestions !== false);
     setPlayersList(snap.players || []);
     setStatus(snap.status);
 
@@ -57,7 +64,10 @@ export function GameScreenView({ pin }) {
       setCurrentQuestion(snap.currentQuestion);
       setTimeLeft(snap.timeLeft ?? snap.currentQuestion.timeLimit ?? 0);
       setAnswerCount(
-        snap.answerCount || { count: 0, total: snap.currentQuestion.totalPlayers || 0 }
+        snap.answerCount || {
+          count: 0,
+          total: snap.currentQuestion.totalPlayers || 0,
+        }
       );
     } else if (snap.status === 'LEADERBOARD' && snap.leaderboardData) {
       if (snap.currentQuestion) setCurrentQuestion(snap.currentQuestion);
@@ -66,6 +76,7 @@ export function GameScreenView({ pin }) {
     } else if (snap.status === 'PODIUM') {
       setPodiumData(snap.podium || []);
       setAllResults(snap.allResults || snap.podium || []);
+      setQuestionSummaries(snap.questionSummaries || []);
       setRevealedPodiumStep(0);
     }
   }, []);
@@ -101,6 +112,7 @@ export function GameScreenView({ pin }) {
 
     socket.on('host_question_preview', (data) => {
       setStatus('QUESTION_PREVIEW');
+      if (data.sessionMode) setSessionMode(data.sessionMode);
       setCurrentQuestion(data);
       setPreviewDuration(data.previewDuration || 5);
       setPreviewTimeLeft(data.previewDuration || 5);
@@ -109,6 +121,7 @@ export function GameScreenView({ pin }) {
 
     socket.on('host_question_start', (data) => {
       setStatus('QUESTION');
+      if (data.sessionMode) setSessionMode(data.sessionMode);
       setCurrentQuestion(data);
       setAnswerCount({ count: 0, total: data.totalPlayers });
       setTimeLeft(data.timeLimit);
@@ -130,12 +143,24 @@ export function GameScreenView({ pin }) {
       setAutoNextSeconds(autoNextIn || 0);
     });
 
-    socket.on('host_podium', ({ podium, allResults: full }) => {
-      setStatus('PODIUM');
-      setPodiumData(podium || []);
-      setAllResults(full || podium || []);
-      setRevealedPodiumStep(0);
-    });
+    socket.on(
+      'host_podium',
+      ({
+        podium,
+        allResults: full,
+        sessionMode: endMode,
+        hasScoredQuestions: hasScored,
+        questionSummaries: summaries,
+      }) => {
+        setStatus('PODIUM');
+        if (endMode) setSessionMode(endMode);
+        if (hasScored !== undefined) setHasScoredQuestions(hasScored);
+        setPodiumData(podium || []);
+        setAllResults(full || podium || []);
+        setQuestionSummaries(summaries || []);
+        setRevealedPodiumStep(0);
+      }
+    );
 
     socket.on('game_aborted', () => {
       setStatus('ABORTED');
@@ -240,6 +265,12 @@ export function GameScreenView({ pin }) {
   };
 
   const previewWholeSeconds = Math.max(1, Math.ceil(previewTimeLeft));
+  const modeMeta = QUIZ_MODES[sessionMode] || QUIZ_MODES.quiz;
+  const currentQType = currentQuestion?.type || 'abcd';
+  const currentQTypeMeta = QUESTION_TYPES[currentQType] || QUESTION_TYPES.abcd;
+  const lbType = leaderboardData?.questionType || currentQType || 'abcd';
+  const lbScored = leaderboardData?.scored !== false;
+  const isOpinionSummary = !hasScoredQuestions || sessionMode === 'opinion';
 
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
@@ -266,6 +297,9 @@ export function GameScreenView({ pin }) {
                 Cyber Quiz
               </span>
               <Badge variant="default">Ekran gry</Badge>
+              {connected && (
+                <Badge variant={modeMeta.badgeVariant}>{modeMeta.label}</Badge>
+              )}
               {quizTitle && (
                 <span className="hidden sm:inline text-sm font-heading font-bold text-foreground/75 truncate max-w-xs">
                   • {quizTitle}
@@ -297,7 +331,10 @@ export function GameScreenView({ pin }) {
         <main className="mx-auto w-full max-w-5xl">
           {/* ŁADOWANIE */}
           {status === 'LOADING' && (
-            <Card key="loading" className="mx-auto max-w-lg p-10 text-center space-y-4 animate-screen-enter">
+            <Card
+              key="loading"
+              className="mx-auto max-w-lg p-10 text-center space-y-4 animate-screen-enter"
+            >
               <Badge variant="neutral">Łączenie...</Badge>
               <h2 className="font-heading text-2xl font-extrabold">
                 Synchronizacja ekranu gry
@@ -310,12 +347,18 @@ export function GameScreenView({ pin }) {
 
           {/* BŁĄD */}
           {status === 'ERROR' && (
-            <Card key="error" className="mx-auto max-w-lg p-8 text-center space-y-5 animate-screen-enter">
+            <Card
+              key="error"
+              className="mx-auto max-w-lg p-8 text-center space-y-5 animate-screen-enter"
+            >
               <Badge variant="danger">Błąd połączenia</Badge>
               <h2 className="font-heading text-2xl font-extrabold">
                 Nie znaleziono aktywnej sesji
               </h2>
-              <Alert variant="danger" className="text-left text-sm font-heading font-bold">
+              <Alert
+                variant="danger"
+                className="text-left text-sm font-heading font-bold"
+              >
                 Kod błędu: {error}
               </Alert>
               <p className="text-sm text-foreground/75">
@@ -332,9 +375,14 @@ export function GameScreenView({ pin }) {
             <Card key="lobby" className="p-6 md:p-10 animate-screen-enter">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
                 <div className="space-y-6 text-center md:text-left">
-                  <Badge variant="default" className="text-sm px-3 py-1">
-                    Oczekiwanie na graczy
-                  </Badge>
+                  <div className="flex flex-wrap items-center justify-center md:justify-start gap-2">
+                    <Badge variant="default" className="text-sm px-3 py-1">
+                      Oczekiwanie na uczestników
+                    </Badge>
+                    <Badge variant={modeMeta.badgeVariant} className="text-sm px-3 py-1">
+                      {modeMeta.fullLabel}
+                    </Badge>
+                  </div>
 
                   {quizTitle && (
                     <h1 className="font-heading text-2xl md:text-3xl font-extrabold leading-tight">
@@ -353,9 +401,12 @@ export function GameScreenView({ pin }) {
 
                   <div className="flex items-center justify-center md:justify-start gap-3">
                     <span className="font-heading text-lg font-bold">
-                      Połączeni gracze:
+                      Połączeni uczestnicy:
                     </span>
-                    <Badge variant="default" className="text-base px-3 py-1 tabular-nums">
+                    <Badge
+                      variant="default"
+                      className="text-base px-3 py-1 tabular-nums"
+                    >
                       {playersList.length}
                     </Badge>
                   </div>
@@ -400,7 +451,7 @@ export function GameScreenView({ pin }) {
                     ))}
                     {playersList.length === 0 && (
                       <span className="text-sm text-foreground/75">
-                        Brak połączonych graczy — udostępnij PIN lub kod QR.
+                        Brak połączonych uczestników — udostępnij PIN lub kod QR.
                       </span>
                     )}
                   </div>
@@ -442,20 +493,31 @@ export function GameScreenView({ pin }) {
               >
                 {/* Pasek górny rundy */}
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b-2 border-border pb-5">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="default" className="text-sm px-3 py-1">
                       Pytanie {currentQuestion.qIndex + 1} /{' '}
                       {currentQuestion.totalQuestions}
                     </Badge>
-                    {status === 'QUESTION_PREVIEW' && (
+                    <Badge
+                      variant={currentQTypeMeta.badgeVariant}
+                      className="text-sm px-3 py-1"
+                    >
+                      {currentQTypeMeta.shortLabel}
+                    </Badge>
+                    {currentQuestion.scored === false && (
                       <Badge variant="info" className="text-sm px-3 py-1">
+                        Opinia
+                      </Badge>
+                    )}
+                    {status === 'QUESTION_PREVIEW' && (
+                      <Badge variant="neutral" className="text-sm px-3 py-1">
                         Czytaj pytanie
                       </Badge>
                     )}
                   </div>
 
                   {status === 'QUESTION_PREVIEW' ? (
-                    <div className="flex flex-1 min-w-[220px] max-w-md items-center gap-3">
+                    <div className="flex flex-1 min-w-[200px] max-w-md items-center gap-3">
                       <Progress
                         value={
                           previewDuration > 0
@@ -472,7 +534,7 @@ export function GameScreenView({ pin }) {
                       </Badge>
                     </div>
                   ) : (
-                    <div className="flex flex-1 min-w-[220px] max-w-md items-center gap-3">
+                    <div className="flex flex-1 min-w-[200px] max-w-md items-center gap-3">
                       <Progress
                         value={
                           currentQuestion.timeLimit > 0
@@ -497,7 +559,7 @@ export function GameScreenView({ pin }) {
                   </Badge>
                 </div>
 
-                {/* Treść pytania — płynnie dopasowuje rozmiar między podglądem a ujawnieniem odpowiedzi */}
+                {/* Treść pytania */}
                 {currentQuestion.content && (
                   <h1
                     className={cn(
@@ -515,7 +577,7 @@ export function GameScreenView({ pin }) {
                   </h1>
                 )}
 
-                {/* Zdjęcie do pytania (widoczne w podglądzie oraz podczas odpowiadania) */}
+                {/* Zdjęcie do pytania */}
                 {currentQuestion.image && (
                   <div className="flex justify-center animate-slide-up">
                     <div className="inline-flex items-center justify-center rounded-base border-2 border-border bg-background p-2 shadow-shadow max-w-full">
@@ -545,7 +607,11 @@ export function GameScreenView({ pin }) {
                     )}
                   >
                     <div className="text-sm font-heading font-bold uppercase tracking-wide text-foreground/75">
-                      Odpowiedzi pojawią się za
+                      {currentQType === 'word_cloud'
+                        ? 'Wpisywanie haseł rozpocznie się za'
+                        : currentQType === 'slider'
+                        ? 'Suwak odblokuje się za'
+                        : 'Odpowiedzi pojawią się za'}
                     </div>
                     <div
                       key={`preview-sec-${previewWholeSeconds}`}
@@ -559,96 +625,188 @@ export function GameScreenView({ pin }) {
                       {previewWholeSeconds}
                     </div>
                     <p className="text-sm text-foreground/75">
-                      Przeczytaj uważnie treść pytania — przyciski na telefonach odblokują się za chwilę!
+                      Przeczytaj uważnie treść pytania — telefony odblokują się za chwilę!
                     </p>
                   </div>
                 )}
 
-                {/* FAZA 2: Ujawnione odpowiedzi (kaskadowa animacja) */}
-                {status === 'QUESTION' && Array.isArray(currentQuestion.answers) && (() => {
-                  const hasAnyAnswerImages =
-                    Array.isArray(currentQuestion.answerImages) &&
-                    currentQuestion.answerImages.some(Boolean);
+                {/* FAZA 2: AKTYWNE ODPOWIADANIE — ZALEŻNIE OD FORMY PYTANIA */}
 
-                  return (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-5 pb-1 pr-1">
-                      {currentQuestion.answers.map((ans, idx) => {
-                        const opt = ANSWER_OPTIONS[idx];
-                        const ansImg = currentQuestion.answerImages?.[idx];
+                {/* 1. ABCD oraz ANKIETA */}
+                {status === 'QUESTION' &&
+                  (currentQType === 'abcd' || currentQType === 'poll') &&
+                  Array.isArray(currentQuestion.answers) &&
+                  (() => {
+                    const hasAnyAnswerImages =
+                      Array.isArray(currentQuestion.answerImages) &&
+                      currentQuestion.answerImages.some(Boolean);
 
-                        if (hasAnyAnswerImages) {
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-5 pb-1 pr-1">
+                        {currentQuestion.answers.map((ans, idx) => {
+                          const opt = ANSWER_OPTIONS[idx];
+                          const ansImg = currentQuestion.answerImages?.[idx];
+
+                          if (hasAnyAnswerImages) {
+                            return (
+                              <div
+                                key={idx}
+                                style={{ animationDelay: `${idx * 75}ms` }}
+                                className="flex flex-col gap-3 rounded-base border-2 border-border bg-secondary-background p-4 shadow-shadow animate-answer-reveal"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <span
+                                    className={cn(
+                                      'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-lg font-extrabold text-foreground',
+                                      opt.bgClass
+                                    )}
+                                  >
+                                    {opt.label}
+                                  </span>
+                                  {ans && (
+                                    <span className="font-heading text-lg md:text-xl font-bold leading-snug">
+                                      {ans}
+                                    </span>
+                                  )}
+                                </div>
+                                {ansImg && (
+                                  <div className="flex h-36 md:h-44 w-full items-center justify-center rounded-base border-2 border-border bg-background p-1.5 overflow-hidden">
+                                    <img
+                                      src={ansImg}
+                                      alt={`Odpowiedź ${opt.label}`}
+                                      className="max-h-full max-w-full object-contain"
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
+
                           return (
                             <div
                               key={idx}
                               style={{ animationDelay: `${idx * 75}ms` }}
-                              className="flex flex-col gap-3 rounded-base border-2 border-border bg-secondary-background p-4 shadow-shadow animate-answer-reveal"
+                              className="flex items-center gap-4 rounded-base border-2 border-border bg-secondary-background p-5 shadow-shadow animate-answer-reveal"
                             >
-                              <div className="flex items-center gap-3">
-                                <span
-                                  className={cn(
-                                    'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-lg font-extrabold text-foreground',
-                                    opt.bgClass
-                                  )}
-                                >
-                                  {opt.label}
-                                </span>
-                                {ans && (
-                                  <span className="font-heading text-lg md:text-xl font-bold leading-snug">
-                                    {ans}
-                                  </span>
+                              <span
+                                className={cn(
+                                  'flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-xl font-extrabold text-foreground',
+                                  opt.bgClass
                                 )}
-                              </div>
-                              {ansImg && (
-                                <div className="flex h-36 md:h-44 w-full items-center justify-center rounded-base border-2 border-border bg-background p-1.5 overflow-hidden">
-                                  <img
-                                    src={ansImg}
-                                    alt={`Odpowiedź ${opt.label}`}
-                                    className="max-h-full max-w-full object-contain"
-                                  />
-                                </div>
-                              )}
+                              >
+                                {opt.label}
+                              </span>
+                              <span className="font-heading text-xl md:text-2xl font-bold leading-snug">
+                                {ans}
+                              </span>
                             </div>
                           );
-                        }
+                        })}
+                      </div>
+                    );
+                  })()}
 
-                        return (
-                          <div
-                            key={idx}
-                            style={{ animationDelay: `${idx * 75}ms` }}
-                            className="flex items-center gap-4 rounded-base border-2 border-border bg-secondary-background p-5 shadow-shadow animate-answer-reveal"
-                          >
-                            <span
-                              className={cn(
-                                'flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-base border-2 border-border font-heading text-xl font-extrabold text-foreground',
-                                opt.bgClass
-                              )}
-                            >
-                              {opt.label}
-                            </span>
-                            <span className="font-heading text-xl md:text-2xl font-bold leading-snug">
-                              {ans}
-                            </span>
-                          </div>
-                        );
-                      })}
+                {/* 2. PRAWDA / FAŁSZ */}
+                {status === 'QUESTION' && currentQType === 'true_false' && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pb-1 pr-1">
+                    {TRUE_FALSE_OPTIONS.map((opt, idx) => (
+                      <div
+                        key={opt.label}
+                        style={{ animationDelay: `${idx * 90}ms` }}
+                        className={cn(
+                          'flex items-center justify-center gap-4 rounded-base border-2 border-border p-8 shadow-shadow animate-answer-reveal',
+                          opt.bgClass
+                        )}
+                      >
+                        <span className="flex h-14 w-14 items-center justify-center rounded-base border-2 border-border bg-secondary-background font-heading text-3xl font-extrabold">
+                          {opt.symbol}
+                        </span>
+                        <span className="font-heading text-3xl md:text-4xl font-extrabold uppercase tracking-wide">
+                          {currentQuestion.answers?.[idx] || opt.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 3. SLIDER (przedział) */}
+                {status === 'QUESTION' && currentQType === 'slider' && (
+                  <div className="mx-auto max-w-2xl rounded-base border-2 border-border bg-background p-6 md:p-8 text-center space-y-5 animate-answer-reveal">
+                    <Badge variant="info" className="text-sm px-3 py-1">
+                      Ustaw wartość na telefonie
+                    </Badge>
+                    <div className="space-y-3">
+                      <div className="h-5 w-full rounded-base border-2 border-border bg-secondary-background relative overflow-hidden">
+                        <div className="h-full w-1/2 bg-info/40 border-r-2 border-border" />
+                      </div>
+                      <div className="flex items-center justify-between font-heading text-2xl md:text-3xl font-extrabold tabular-nums">
+                        <span>
+                          {currentQuestion.sliderMin}
+                          {currentQuestion.sliderUnit
+                            ? ` ${currentQuestion.sliderUnit}`
+                            : ''}
+                        </span>
+                        <span className="text-base text-foreground/60">
+                          krok {currentQuestion.sliderStep}
+                        </span>
+                        <span>
+                          {currentQuestion.sliderMax}
+                          {currentQuestion.sliderUnit
+                            ? ` ${currentQuestion.sliderUnit}`
+                            : ''}
+                        </span>
+                      </div>
                     </div>
-                  );
-                })()}
+                  </div>
+                )}
+
+                {/* 4. CHMURA SŁÓW */}
+                {status === 'QUESTION' && currentQType === 'word_cloud' && (
+                  <div className="mx-auto max-w-2xl rounded-base border-2 border-border bg-background p-6 md:p-8 text-center space-y-4 animate-answer-reveal">
+                    <Badge variant="purple" className="text-sm px-3 py-1">
+                      Chmura słów — wpisz hasło na telefonie
+                    </Badge>
+                    <div className="font-heading text-4xl md:text-5xl font-extrabold tabular-nums">
+                      {answerCount.count}{' '}
+                      <span className="text-2xl text-foreground/70">
+                        / {answerCount.total}
+                      </span>
+                    </div>
+                    <p className="text-sm text-foreground/75">
+                      Zebrane hasła utworzą wspólną chmurę słów zaraz po zakończeniu czasu (maks.{' '}
+                      {currentQuestion.maxLength || 32} znaków).
+                    </p>
+                  </div>
+                )}
               </Card>
             )}
 
-          {/* TABLICA WYNIKÓW PO RUNDZIE */}
+          {/* WYNIKI PO RUNDZIE (LEADERBOARD / ANKIETA / CHMURA SŁÓW / SLIDER) */}
           {status === 'LEADERBOARD' && leaderboardData && (
             <Card
               key={`leaderboard-${leaderboardData.qIndex ?? 'curr'}`}
               className="p-6 md:p-8 space-y-6 animate-screen-enter"
             >
               <div className="flex flex-wrap items-center justify-between gap-4 border-b-2 border-border pb-4">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <h2 className="font-heading text-2xl font-extrabold">
-                    Wyniki po pytaniu
+                    {lbType === 'poll'
+                      ? 'Wyniki ankiety'
+                      : lbType === 'word_cloud'
+                      ? 'Chmura słów'
+                      : lbType === 'slider' && !lbScored
+                      ? 'Rozkład opinii (Slider)'
+                      : 'Wyniki po pytaniu'}
                   </h2>
-                  <Badge variant="neutral">Top 5</Badge>
+                  <Badge
+                    variant={
+                      (QUESTION_TYPES[lbType] || QUESTION_TYPES.abcd)
+                        .badgeVariant
+                    }
+                  >
+                    {(QUESTION_TYPES[lbType] || QUESTION_TYPES.abcd).shortLabel}
+                  </Badge>
+                  {lbScored && <Badge variant="neutral">Top 5</Badge>}
                 </div>
 
                 {leaderboardData.isPaused ? (
@@ -656,121 +814,318 @@ export function GameScreenView({ pin }) {
                     Wstrzymane przez prowadzącego
                   </Badge>
                 ) : (
-                  <Badge variant="neutral" className="text-sm px-3 py-1 tabular-nums">
+                  <Badge
+                    variant="neutral"
+                    className="text-sm px-3 py-1 tabular-nums"
+                  >
                     {leaderboardData.isLastQuestion
-                      ? `Podium za ${autoNextSeconds} s`
+                      ? isOpinionSummary
+                        ? `Podsumowanie za ${autoNextSeconds} s`
+                        : `Podium za ${autoNextSeconds} s`
                       : `Następne pytanie za ${autoNextSeconds} s`}
                   </Badge>
                 )}
               </div>
 
-              <Alert variant="default" className="flex flex-wrap items-center gap-3">
-                <span className="font-heading font-bold">Poprawna odpowiedź:</span>
-                <Badge
-                  variant={ANSWER_OPTIONS[leaderboardData.correctIndex]?.badgeVariant}
-                  className="text-sm px-2.5 py-0.5"
-                >
-                  {ANSWER_OPTIONS[leaderboardData.correctIndex]?.label}
-                </Badge>
-                {currentQuestion?.answers?.[leaderboardData.correctIndex] && (
-                  <strong className="font-heading text-base md:text-lg font-extrabold">
-                    {currentQuestion.answers[leaderboardData.correctIndex]}
-                  </strong>
+              {/* Treść pytania w skrócie dla ankiet / chmury słów / slidera */}
+              {(lbType === 'poll' ||
+                lbType === 'word_cloud' ||
+                lbType === 'slider') &&
+                currentQuestion?.content && (
+                  <div className="rounded-base border-2 border-border bg-background px-4 py-3 font-heading text-lg md:text-xl font-extrabold text-center">
+                    {currentQuestion.content}
+                  </div>
                 )}
-                {currentQuestion?.answerImages?.[leaderboardData.correctIndex] && (
-                  <img
-                    src={currentQuestion.answerImages[leaderboardData.correctIndex]}
-                    alt={`Poprawna odpowiedź ${ANSWER_OPTIONS[leaderboardData.correctIndex]?.label || ''}`}
-                    className="h-16 md:h-20 w-auto max-w-[180px] rounded-base border-2 border-border bg-secondary-background object-contain p-1"
-                  />
-                )}
-              </Alert>
 
-              {/* Rozkład odpowiedzi z płynnym wzrostem słupków */}
-              {leaderboardData.distribution && (
-                <div className="rounded-base border-2 border-border bg-background p-4 md:p-5">
-                  <div className="mb-4 text-xs font-heading font-bold uppercase tracking-wide text-foreground/75">
-                    Rozkład odpowiedzi
-                  </div>
-                  <div className="grid grid-cols-4 gap-3 md:gap-6 text-center">
-                    {leaderboardData.distribution.map((count, idx) => {
-                      const total = leaderboardData.distribution.reduce(
-                        (a, b) => a + b,
-                        0
-                      );
-                      const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-                      const opt = ANSWER_OPTIONS[idx];
-                      const isCorrect = idx === leaderboardData.correctIndex;
+              {/* 1. ABCD oraz PRAWDA/FAŁSZ — poprawna odpowiedź + słupki */}
+              {(lbType === 'abcd' || lbType === 'true_false') && (
+                <>
+                  <Alert
+                    variant="default"
+                    className="flex flex-wrap items-center gap-3"
+                  >
+                    <span className="font-heading font-bold">
+                      Poprawna odpowiedź:
+                    </span>
+                    {(() => {
+                      const opt =
+                        lbType === 'true_false'
+                          ? TRUE_FALSE_OPTIONS[leaderboardData.correctIndex]
+                          : ANSWER_OPTIONS[leaderboardData.correctIndex];
                       return (
-                        <div key={idx} className="flex flex-col items-center gap-2">
-                          <div className="flex items-center gap-1">
-                            <Badge variant={opt.badgeVariant}>{opt.label}</Badge>
-                            {isCorrect && <Badge variant="default">✓</Badge>}
-                          </div>
-                          <div className="flex h-28 w-full items-end justify-center rounded-base border-2 border-border bg-secondary-background p-2">
-                            <div
-                              style={{
-                                height: barsAnimated
-                                  ? `${Math.max(pct, 8)}%`
-                                  : '4%',
-                              }}
-                              className={cn(
-                                'w-full max-w-[3.5rem] rounded-base border-2 border-border transition-all duration-700 ease-out',
-                                opt.bgClass
-                              )}
-                            />
-                          </div>
-                          <div className="text-xs sm:text-sm font-heading font-bold tabular-nums">
-                            {count} ({pct}%)
-                          </div>
-                        </div>
+                        <Badge
+                          variant={opt?.badgeVariant || 'default'}
+                          className="text-sm px-2.5 py-0.5"
+                        >
+                          {lbType === 'true_false'
+                            ? `${opt?.symbol || ''} ${opt?.label || ''}`
+                            : opt?.label}
+                        </Badge>
                       );
-                    })}
-                  </div>
-                </div>
+                    })()}
+                    {lbType === 'abcd' &&
+                      currentQuestion?.answers?.[leaderboardData.correctIndex] && (
+                        <strong className="font-heading text-base md:text-lg font-extrabold">
+                          {currentQuestion.answers[leaderboardData.correctIndex]}
+                        </strong>
+                      )}
+                    {currentQuestion?.answerImages?.[
+                      leaderboardData.correctIndex
+                    ] && (
+                      <img
+                        src={
+                          currentQuestion.answerImages[
+                            leaderboardData.correctIndex
+                          ]
+                        }
+                        alt="Poprawna odpowiedź"
+                        className="h-16 md:h-20 w-auto max-w-[180px] rounded-base border-2 border-border bg-secondary-background object-contain p-1"
+                      />
+                    )}
+                  </Alert>
+
+                  {Array.isArray(leaderboardData.distribution) && (
+                    <div className="rounded-base border-2 border-border bg-background p-4 md:p-5">
+                      <div className="mb-4 text-xs font-heading font-bold uppercase tracking-wide text-foreground/75">
+                        Rozkład odpowiedzi
+                      </div>
+                      <div
+                        className={cn(
+                          'grid gap-3 md:gap-6 text-center',
+                          leaderboardData.distribution.length === 2
+                            ? 'grid-cols-2 max-w-lg mx-auto'
+                            : leaderboardData.distribution.length === 3
+                            ? 'grid-cols-3'
+                            : 'grid-cols-4'
+                        )}
+                      >
+                        {leaderboardData.distribution.map((count, idx) => {
+                          const total = leaderboardData.distribution.reduce(
+                            (a, b) => a + b,
+                            0
+                          );
+                          const pct =
+                            total > 0 ? Math.round((count / total) * 100) : 0;
+                          const opt =
+                            lbType === 'true_false'
+                              ? TRUE_FALSE_OPTIONS[idx] || ANSWER_OPTIONS[idx]
+                              : ANSWER_OPTIONS[idx];
+                          const isCorrect =
+                            idx === leaderboardData.correctIndex;
+                          return (
+                            <div
+                              key={idx}
+                              className="flex flex-col items-center gap-2"
+                            >
+                              <div className="flex items-center gap-1">
+                                <Badge variant={opt.badgeVariant}>
+                                  {opt.label}
+                                </Badge>
+                                {isCorrect && <Badge variant="default">✓</Badge>}
+                              </div>
+                              <div className="flex h-28 w-full items-end justify-center rounded-base border-2 border-border bg-secondary-background p-2">
+                                <div
+                                  style={{
+                                    height: barsAnimated
+                                      ? `${Math.max(pct, 8)}%`
+                                      : '4%',
+                                  }}
+                                  className={cn(
+                                    'w-full max-w-[3.5rem] rounded-base border-2 border-border transition-all duration-700 ease-out',
+                                    opt.bgClass
+                                  )}
+                                />
+                              </div>
+                              <div className="text-xs sm:text-sm font-heading font-bold tabular-nums">
+                                {count} ({pct}%)
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
-              {/* Top 5 */}
-              <div className="space-y-3">
-                {leaderboardData.topPlayers.map((p, idx) => (
-                  <div
-                    key={p.nickname}
-                    style={{ animationDelay: `${idx * 70}ms` }}
-                    className={cn(
-                      'flex items-center justify-between gap-4 rounded-base border-2 border-border p-3.5 md:p-4 animate-list-item',
-                      idx === 0 ? 'bg-main' : 'bg-secondary-background'
-                    )}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <Badge
-                        variant={
-                          idx === 0
-                            ? 'warning'
-                            : idx === 1
-                            ? 'info'
-                            : idx === 2
-                            ? 'purple'
-                            : 'neutral'
-                        }
-                        className="text-sm px-2.5 py-1"
-                      >
-                        #{idx + 1}
-                      </Badge>
-                      <span className="font-heading text-lg md:text-xl font-bold truncate">
-                        @{p.nickname}
+              {/* 2. ANKIETA — WYKRES KOŁOWY */}
+              {lbType === 'poll' && (
+                <PieChart
+                  distribution={leaderboardData.distribution || []}
+                  answers={currentQuestion?.answers || []}
+                  answerImages={currentQuestion?.answerImages || []}
+                />
+              )}
+
+              {/* 3. CHMURA SŁÓW */}
+              {lbType === 'word_cloud' && (
+                <WordCloud
+                  entries={leaderboardData.wordCloud || []}
+                  totalResponses={leaderboardData.totalResponses || 0}
+                  uniqueCount={leaderboardData.uniqueCount || 0}
+                />
+              )}
+
+              {/* 4. SLIDER — HISTOGRAM + ŚREDNIA/MEDIANA (+ CEL GDY PUNKTOWANE) */}
+              {lbType === 'slider' && (
+                <SliderResults
+                  sliderStats={leaderboardData.sliderStats}
+                  scored={lbScored}
+                  barsAnimated={barsAnimated}
+                />
+              )}
+
+              {/* Top 5 (tylko dla pytań punktowanych) */}
+              {lbScored && leaderboardData.topPlayers?.length > 0 && (
+                <div className="space-y-3">
+                  {leaderboardData.topPlayers.map((p, idx) => (
+                    <div
+                      key={p.nickname}
+                      style={{ animationDelay: `${idx * 70}ms` }}
+                      className={cn(
+                        'flex items-center justify-between gap-4 rounded-base border-2 border-border p-3.5 md:p-4 animate-list-item',
+                        idx === 0 ? 'bg-main' : 'bg-secondary-background'
+                      )}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Badge
+                          variant={
+                            idx === 0
+                              ? 'warning'
+                              : idx === 1
+                              ? 'info'
+                              : idx === 2
+                              ? 'purple'
+                              : 'neutral'
+                          }
+                          className="text-sm px-2.5 py-1"
+                        >
+                          #{idx + 1}
+                        </Badge>
+                        <span className="font-heading text-lg md:text-xl font-bold truncate">
+                          @{p.nickname}
+                        </span>
+                      </div>
+                      <span className="font-heading text-lg md:text-xl font-extrabold tabular-nums flex-shrink-0">
+                        {p.score} pkt
                       </span>
                     </div>
-                    <span className="font-heading text-lg md:text-xl font-extrabold tabular-nums flex-shrink-0">
-                      {p.score} pkt
-                    </span>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+
+          {/* EKRAN KOŃCOWY: PODIUM (QUIZ / MIESZANY) LUB PODSUMOWANIE OPINII */}
+          {status === 'PODIUM' && isOpinionSummary && (
+            <Card
+              key="opinion-summary"
+              className="p-6 md:p-10 space-y-8 animate-screen-enter"
+            >
+              <div className="text-center space-y-3">
+                <Badge variant="info" className="text-sm px-3 py-1">
+                  Koniec sesji opinii
+                </Badge>
+                <h1 className="font-heading text-3xl md:text-5xl font-extrabold tracking-tight">
+                  Dziękujemy za wszystkie głosy!
+                </h1>
+                <p className="text-base text-foreground/75">
+                  Podsumowanie zebranych odpowiedzi od{' '}
+                  <strong>{playersList.length}</strong> uczestników.
+                </p>
+              </div>
+
+              <div className="space-y-4 max-h-[55vh] overflow-y-auto pr-1">
+                {questionSummaries.map((item, idx) => {
+                  const tMeta =
+                    QUESTION_TYPES[item.type] || QUESTION_TYPES.poll;
+                  return (
+                    <div
+                      key={item.qIndex}
+                      style={{ animationDelay: `${idx * 70}ms` }}
+                      className="rounded-base border-2 border-border bg-background p-5 space-y-3 animate-list-item"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="default">#{item.qIndex + 1}</Badge>
+                          <Badge variant={tMeta.badgeVariant}>
+                            {tMeta.label}
+                          </Badge>
+                        </div>
+                        <Badge variant="neutral" className="tabular-nums">
+                          Odpowiedzi: {item.totalResponses}
+                        </Badge>
+                      </div>
+
+                      <h3 className="font-heading text-lg md:text-xl font-extrabold">
+                        {item.content}
+                      </h3>
+
+                      {item.type === 'poll' &&
+                        Array.isArray(item.distribution) && (
+                          <div className="flex flex-wrap gap-2">
+                            {item.distribution.map((c, aIdx) => {
+                              const tot = item.distribution.reduce(
+                                (a, b) => a + b,
+                                0
+                              );
+                              const pct =
+                                tot > 0 ? Math.round((c / tot) * 100) : 0;
+                              const opt = ANSWER_OPTIONS[aIdx];
+                              return (
+                                <Badge
+                                  key={aIdx}
+                                  variant={opt?.badgeVariant || 'neutral'}
+                                  className="text-sm px-3 py-1"
+                                >
+                                  {opt?.label}:{' '}
+                                  {item.answers?.[aIdx] || `Opcja ${opt?.label}`}{' '}
+                                  — {pct}% ({c})
+                                </Badge>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                      {item.type === 'slider' && (
+                        <div className="flex flex-wrap gap-2">
+                          <Badge variant="info" className="text-sm px-3 py-1">
+                            Średnia: {item.avg ?? '—'} {item.sliderUnit || ''}
+                          </Badge>
+                          <Badge variant="purple" className="text-sm px-3 py-1">
+                            Mediana: {item.median ?? '—'} {item.sliderUnit || ''}
+                          </Badge>
+                        </div>
+                      )}
+
+                      {item.type === 'word_cloud' && (
+                        <div className="flex flex-wrap gap-2">
+                          {item.topWords?.length > 0 ? (
+                            item.topWords.map((w) => (
+                              <Badge
+                                key={w.word}
+                                variant="neutral"
+                                className="text-sm px-3 py-1"
+                              >
+                                {w.word} (×{w.count})
+                              </Badge>
+                            ))
+                          ) : (
+                            <span className="text-sm text-foreground/75">
+                              Brak przesłanych haseł.
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </Card>
           )}
 
           {/* PODIUM + PRZEWIJANA LISTA WSZYSTKICH WYNIKÓW */}
-          {status === 'PODIUM' && (
+          {status === 'PODIUM' && !isOpinionSummary && (
             <Card
               key="podium"
               className="p-6 md:p-10 text-center space-y-8 animate-screen-enter"
@@ -851,7 +1206,10 @@ export function GameScreenView({ pin }) {
                     <h2 className="font-heading text-xl font-extrabold">
                       Pełna klasyfikacja wyników
                     </h2>
-                    <Badge variant="neutral" className="text-sm px-3 py-1 tabular-nums">
+                    <Badge
+                      variant="neutral"
+                      className="text-sm px-3 py-1 tabular-nums"
+                    >
                       {allResults.length}{' '}
                       {allResults.length === 1 ? 'uczestnik' : 'uczestników'}
                     </Badge>
@@ -920,7 +1278,7 @@ export function GameScreenView({ pin }) {
                 Gra została przerwana
               </h2>
               <p className="text-base text-foreground/75">
-                Prowadzący zakończył bieżącą sesję quizu. Możesz zamknąć to okno.
+                Prowadzący zakończył bieżącą sesję. Możesz zamknąć to okno.
               </p>
               <Button
                 type="button"
