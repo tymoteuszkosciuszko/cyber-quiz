@@ -8,7 +8,10 @@ export const BACKEND_URL =
   (import.meta.env.DEV
     ? `http://${window.location.hostname}:3001`
     : window.location.origin);
-export const socket = io(BACKEND_URL, { autoConnect: true });
+export const socket = io(BACKEND_URL, {
+  autoConnect: true,
+  withCredentials: true,
+});
 
 export const ANSWER_OPTIONS = [
   { label: 'A', symbol: '▲', badgeVariant: 'danger', bgClass: 'bg-danger', hex: '#ff6b6b' },

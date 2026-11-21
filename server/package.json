@@ -4,13 +4,20 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "bootstrap-superadmin": "node scripts/bootstrap-superadmin.mjs",
+    "reset-superadmin": "node scripts/reset-superadmin.mjs"
   },
   "dependencies": {
+    "argon2": "^0.41.1",
+    "cookie": "^1.0.2",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "helmet": "^8.0.0",
     "ioredis": "^5.4.1",
+    "pg": "^8.13.1",
     "socket.io": "^4.7.5",
-    "uuid": "^10.0.0"
+    "uuid": "^10.0.0",
+    "zod": "^3.23.8"
   }
 }

@@ -13,4 +13,5 @@ export { Badge } from './Badge';
 export { Progress } from './Progress';
 export { Alert } from './Alert';
 export { Label } from './Label';
+export { Switch } from './Switch';
 export { cn } from './utils';

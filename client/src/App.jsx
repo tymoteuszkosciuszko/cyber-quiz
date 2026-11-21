@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Badge, Button, cn } from './components/ui';
 import {
-  BACKEND_URL,
   QUIZ_MODES,
   createEmptyQuestion,
   createQuestionUid,
@@ -14,7 +13,17 @@ import { HostControlPanel } from './components/HostControlPanel';
 import { PlayerView } from './components/PlayerView';
 import { AdminMenu } from './components/AdminMenu';
 import { QuizEditor } from './components/QuizEditor';
+import { LoginView } from './components/auth/LoginView';
+import { ForcePasswordChangeView } from './components/auth/ForcePasswordChangeView';
+import { AccountSecurityModal } from './components/auth/AccountSecurityModal';
+import { SuperAdminPanel } from './components/auth/SuperAdminPanel';
 import { isValidImageValue } from './utils/imageUtils';
+import {
+  apiFetch,
+  apiJson,
+  setCsrfToken,
+  setUnauthorizedHandler,
+} from './utils/api';
 
 // ════════════════════════════════════════════════════
 // Routing:
@@ -38,8 +47,13 @@ export default function App() {
 }
 
 function MainApp() {
+  // ─── STAN UWIERZYTELNIANIA (tylko /game-admin) ───
+  const [authLoading, setAuthLoading] = useState(isAdminRoute);
+  const [authUser, setAuthUser] = useState(null);
+  const [showSecurityModal, setShowSecurityModal] = useState(false);
+
   // ─── TRYB APLIKACJI ───
-  // Admin: MENU | EDITOR | HOST
+  // Admin: MENU | EDITOR | HOST | SUPERADMIN
   // Player: PLAYER (zawsze)
   const [mode, setMode] = useState(() => (isAdminRoute ? 'MENU' : 'PLAYER'));
 
@@ -88,17 +102,108 @@ function MainApp() {
   const [playerResult, setPlayerResult] = useState(null);
   const [playerCountdown, setPlayerCountdown] = useState(0);
 
-  // ─── Pobieranie listy quizów ───
-  const fetchQuizzes = useCallback(() => {
-    fetch(`${BACKEND_URL}/api/quizzes`)
-      .then((r) => r.json())
-      .then((data) => setQuizzes(data))
-      .catch(() => { });
+  const reconnectSocket = useCallback(() => {
+    if (socket.connected) {
+      socket.disconnect();
+    }
+    socket.connect();
   }, []);
 
+  const clearAuthState = useCallback(() => {
+    setCsrfToken(null);
+    setAuthUser(null);
+    setShowSecurityModal(false);
+    setQuizzes([]);
+    setMode('MENU');
+    reconnectSocket();
+  }, [reconnectSocket]);
+
+  // ─── Sprawdzanie sesji przy starcie (/game-admin) ───
   useEffect(() => {
-    if (isAdminRoute) fetchQuizzes();
-  }, [mode, fetchQuizzes]);
+    if (!isAdminRoute) return undefined;
+
+    setUnauthorizedHandler(() => {
+      clearAuthState();
+    });
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { res, data } = await apiJson('/api/auth/me', {
+          skipAuthRedirect: true,
+        });
+        if (cancelled) return;
+        if (res.ok && data.user) {
+          setCsrfToken(data.csrfToken);
+          setAuthUser(data.user);
+        } else {
+          setCsrfToken(null);
+          setAuthUser(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setCsrfToken(null);
+          setAuthUser(null);
+        }
+      } finally {
+        if (!cancelled) setAuthLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      setUnauthorizedHandler(null);
+    };
+  }, [clearAuthState]);
+
+  const handleAuthenticated = useCallback(
+    (user) => {
+      setAuthUser(user);
+      setMode('MENU');
+      reconnectSocket();
+    },
+    [reconnectSocket]
+  );
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await apiJson('/api/auth/logout', {
+        method: 'POST',
+        skipAuthRedirect: true,
+      });
+    } catch {
+      // ignore
+    } finally {
+      clearAuthState();
+    }
+  }, [clearAuthState]);
+
+  const isFullyAuthenticatedAdmin =
+    isAdminRoute && Boolean(authUser) && !authUser.mustChangePassword;
+
+  // ─── Pobieranie listy quizów (tylko zalogowany admin) ───
+  const fetchQuizzes = useCallback(async () => {
+    if (!isFullyAuthenticatedAdmin) return;
+    try {
+      const res = await apiFetch('/api/quizzes');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setQuizzes(data);
+        setSelectedQuizId((prev) =>
+          data.some((q) => q.id === prev) ? prev : data[0]?.id || ''
+        );
+      }
+    } catch {
+      // ignore
+    }
+  }, [isFullyAuthenticatedAdmin]);
+
+  useEffect(() => {
+    if (isFullyAuthenticatedAdmin && mode === 'MENU') {
+      fetchQuizzes();
+    }
+  }, [isFullyAuthenticatedAdmin, mode, fetchQuizzes]);
 
   // ─── Nasłuchiwanie zdarzeń WebSocket ───
   useEffect(() => {
@@ -209,6 +314,12 @@ function MainApp() {
       }
     });
 
+    socket.on('host_auth_error', ({ error }) => {
+      if (isAdminRoute && error === 'UNAUTHORIZED') {
+        clearAuthState();
+      }
+    });
+
     return () => {
       socket.off('screen_status_update');
       socket.off('player_joined');
@@ -226,8 +337,9 @@ function MainApp() {
       socket.off('player_question_end');
       socket.off('player_podium');
       socket.off('game_aborted');
+      socket.off('host_auth_error');
     };
-  }, []);
+  }, [clearAuthState]);
 
   // ─── Odliczanie czasu podglądu pytania (Host Panel) ───
   useEffect(() => {
@@ -350,6 +462,10 @@ function MainApp() {
     socket.emit('host_create_room', { quizId: selectedQuizId }, (res) => {
       if (res.error) {
         if (popup && !popup.closed) popup.close();
+        if (res.error === 'UNAUTHORIZED') {
+          clearAuthState();
+          return;
+        }
         alert(`Błąd: ${res.error}`);
         return;
       }
@@ -416,9 +532,13 @@ function MainApp() {
   // ─── Edytor: otwórz istniejący quiz do edycji ───
   const openEditQuiz = async (quizId) => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/quizzes/${quizId}`);
+      const res = await apiFetch(`/api/quizzes/${quizId}`);
       if (!res.ok) throw new Error('Nie znaleziono zestawu');
       const quiz = await res.json();
+      if (!quiz.canEdit) {
+        alert('Ten szablon jest tylko do odczytu. Sklonuj go, aby móc go edytować.');
+        return;
+      }
       const quizMode = QUIZ_MODES[quiz.mode] ? quiz.mode : 'quiz';
       setEditingQuizId(quiz.id);
       setEditorTitle(quiz.title);
@@ -472,8 +592,8 @@ function MainApp() {
     try {
       const isEditing = editingQuizId !== null;
       const url = isEditing
-        ? `${BACKEND_URL}/api/quizzes/${editingQuizId}`
-        : `${BACKEND_URL}/api/quizzes`;
+        ? `/api/quizzes/${editingQuizId}`
+        : `/api/quizzes`;
       const method = isEditing ? 'PUT' : 'POST';
 
       const payloadQuestions = editorQuestions.map((q) => {
@@ -513,7 +633,7 @@ function MainApp() {
         return clean;
       });
 
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -537,11 +657,35 @@ function MainApp() {
     }
   };
 
+  // ─── Klonowanie szablonu / quizu ───
+  const cloneQuiz = async (quizId) => {
+    try {
+      const res = await apiFetch(`/api/quizzes/${quizId}/clone`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const cloned = await res.json();
+        setSelectedQuizId(cloned.id);
+        fetchQuizzes();
+      } else {
+        const errBody = await res.json().catch(() => ({}));
+        alert(`Nie udało się sklonować zestawu: ${errBody.error || res.statusText}`);
+      }
+    } catch {
+      alert('Błąd klonowania zestawu');
+    }
+  };
+
   // ─── Usuwanie quizu ───
   const deleteQuiz = async (quizId) => {
     if (!confirm('Czy na pewno chcesz usunąć ten zestaw?')) return;
     try {
-      await fetch(`${BACKEND_URL}/api/quizzes/${quizId}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/quizzes/${quizId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        alert(`Nie udało się usunąć zestawu: ${errBody.error || res.statusText}`);
+        return;
+      }
       fetchQuizzes();
       if (selectedQuizId === quizId) setSelectedQuizId('default-cyber-quiz');
     } catch (_err) {
@@ -552,7 +696,7 @@ function MainApp() {
   // ─── Export quizu do JSON ───
   const exportQuiz = async (quizId) => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/quizzes/${quizId}`);
+      const res = await apiFetch(`/api/quizzes/${quizId}`);
       if (!res.ok) throw new Error('Quiz not found');
       const quiz = await res.json();
       const exportData = {
@@ -637,7 +781,7 @@ function MainApp() {
           }
         }
       }
-      const res = await fetch(`${BACKEND_URL}/api/quizzes`, {
+      const res = await apiFetch('/api/quizzes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -694,8 +838,10 @@ function MainApp() {
   };
 
   const canReturnToMenu =
-    isAdminRoute &&
-    (mode === 'EDITOR' || (mode === 'HOST' && hostStatus === 'PODIUM'));
+    isFullyAuthenticatedAdmin &&
+    (mode === 'EDITOR' ||
+      mode === 'SUPERADMIN' ||
+      (mode === 'HOST' && hostStatus === 'PODIUM'));
 
   // ════════════════════════════════════════════════════
   // RENDER
@@ -706,14 +852,14 @@ function MainApp() {
       <header className="w-full border-b-2 border-border bg-secondary-background">
         <div
           className={cn(
-            'mx-auto flex items-center justify-between gap-4 px-4 py-4 md:px-8',
+            'mx-auto flex flex-wrap items-center justify-between gap-4 px-4 py-4 md:px-8',
             isAdminRoute && mode === 'EDITOR' ? 'max-w-7xl' : 'max-w-6xl'
           )}
         >
           <button
             type="button"
             onClick={() => {
-              if (mode === 'EDITOR') {
+              if (mode === 'EDITOR' || mode === 'SUPERADMIN') {
                 setMode('MENU');
               } else if (mode === 'HOST' && hostStatus === 'PODIUM') {
                 handleFinishSession();
@@ -746,21 +892,58 @@ function MainApp() {
                 {isAdminRoute
                   ? mode === 'HOST'
                     ? 'Panel Prowadzącego'
-                    : 'Panel Admina'
+                    : mode === 'SUPERADMIN'
+                      ? 'Administracja'
+                      : 'Panel Admina'
                   : 'Gracz'}
               </Badge>
             </div>
           </button>
 
-          {isAdminRoute && mode === 'EDITOR' && (
-            <Button
-              type="button"
-              variant="neutral"
-              size="sm"
-              onClick={() => setMode('MENU')}
-            >
-              ← Powrót do menu
-            </Button>
+          {isFullyAuthenticatedAdmin && (
+            <div className="flex flex-wrap items-center gap-2">
+              {mode === 'EDITOR' && (
+                <Button
+                  type="button"
+                  variant="neutral"
+                  size="sm"
+                  onClick={() => setMode('MENU')}
+                >
+                  ← Powrót do menu
+                </Button>
+              )}
+              {authUser.role === 'superadmin' && mode !== 'HOST' && (
+                <Button
+                  type="button"
+                  variant={mode === 'SUPERADMIN' ? 'default' : 'warning'}
+                  size="sm"
+                  onClick={() =>
+                    setMode(mode === 'SUPERADMIN' ? 'MENU' : 'SUPERADMIN')
+                  }
+                >
+                  {mode === 'SUPERADMIN' ? 'Quizy' : 'Admini i Audyt'}
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="neutral"
+                size="sm"
+                onClick={() => setShowSecurityModal(true)}
+              >
+                {authUser.username} (
+                {authUser.role === 'superadmin' ? 'Superadmin' : 'Admin'})
+              </Button>
+              {mode !== 'HOST' && (
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="sm"
+                  onClick={handleLogout}
+                >
+                  Wyloguj
+                </Button>
+              )}
+            </div>
           )}
         </div>
       </header>
@@ -774,7 +957,29 @@ function MainApp() {
             : 'justify-center px-4 py-6 md:px-8 md:py-10'
         )}
       >
-        {isAdminRoute && mode === 'MENU' && (
+        {isAdminRoute && authLoading && (
+          <div className="mx-auto text-sm font-heading font-bold text-foreground/75">
+            Sprawdzanie sesji...
+          </div>
+        )}
+
+        {isAdminRoute && !authLoading && !authUser && (
+          <LoginView onAuthenticated={handleAuthenticated} />
+        )}
+
+        {isAdminRoute && !authLoading && authUser?.mustChangePassword && (
+          <ForcePasswordChangeView
+            user={authUser}
+            onPasswordChanged={handleAuthenticated}
+            onLogout={handleLogout}
+          />
+        )}
+
+        {isFullyAuthenticatedAdmin && mode === 'SUPERADMIN' && (
+          <SuperAdminPanel onBack={() => setMode('MENU')} />
+        )}
+
+        {isFullyAuthenticatedAdmin && mode === 'MENU' && (
           <AdminMenu
             quizzes={quizzes}
             selectedQuizId={selectedQuizId}
@@ -782,6 +987,7 @@ function MainApp() {
             onCreateHostRoom={createHostRoom}
             onOpenNewQuizEditor={openNewQuizEditor}
             onOpenEditQuiz={openEditQuiz}
+            onCloneQuiz={cloneQuiz}
             onExportQuiz={exportQuiz}
             onDeleteQuiz={deleteQuiz}
             onImportQuiz={importQuiz}
@@ -789,7 +995,7 @@ function MainApp() {
           />
         )}
 
-        {isAdminRoute && mode === 'EDITOR' && (
+        {isFullyAuthenticatedAdmin && mode === 'EDITOR' && (
           <QuizEditor
             editingQuizId={editingQuizId}
             editorTitle={editorTitle}
@@ -802,7 +1008,7 @@ function MainApp() {
           />
         )}
 
-        {isAdminRoute && mode === 'HOST' && (
+        {isFullyAuthenticatedAdmin && mode === 'HOST' && (
           <HostControlPanel
             roomPin={roomPin}
             activeQuiz={activeQuiz}
@@ -851,9 +1057,21 @@ function MainApp() {
         )}
       </div>
 
+      {showSecurityModal && authUser && (
+        <AccountSecurityModal
+          user={authUser}
+          onClose={() => setShowSecurityModal(false)}
+          onPasswordChanged={(updatedUser) => {
+            setAuthUser(updatedUser);
+            reconnectSocket();
+          }}
+          onLoggedOutAll={clearAuthState}
+        />
+      )}
+
       {/* STOPKA */}
       <footer className="border-t-2 border-border bg-secondary-background px-4 py-3 text-center text-xs font-heading font-bold text-foreground/75">
-        Cyber Quiz | <a class="text-emerald-500" href="https://github.com/tymoteuszkosciuszko/cyber-quiz">GitHub</a>
+        Cyber Quiz | <a className="text-emerald-500" href="https://github.com/tymoteuszkosciuszko/cyber-quiz">GitHub</a>
       </footer>
     </div>
   );
