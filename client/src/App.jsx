@@ -853,7 +853,7 @@ function MainApp() {
 
       {/* STOPKA */}
       <footer className="border-t-2 border-border bg-secondary-background px-4 py-3 text-center text-xs font-heading font-bold text-foreground/75">
-        Cyber Quiz • Platforma quizów na żywo
+        Cyber Quiz | <a class="text-emerald-500" href="https://github.com/tymoteuszkosciuszko/cyber-quiz">GitHub</a>
       </footer>
     </div>
   );
