@@ -6,6 +6,7 @@ import {
   Card,
   Input,
   Label,
+  toast,
   cn,
 } from './ui';
 import {
@@ -191,8 +192,6 @@ export function QuizEditor({
   const [dragArmedIdx, setDragArmedIdx] = useState(null);
   const [draggedIdx, setDraggedIdx] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
-  const [imageError, setImageError] = useState('');
-  const [modeNotice, setModeNotice] = useState('');
   const [validationError, setValidationError] = useState('');
   const [showValidation, setShowValidation] = useState(false);
   const [processingKey, setProcessingKey] = useState('');
@@ -214,8 +213,6 @@ export function QuizEditor({
     setSelectedIdx(0);
     setValidationError('');
     setShowValidation(false);
-    setImageError('');
-    setModeNotice('');
   }, [editingQuizId]);
 
   // Pilnuj poprawnego zakresu wybranego indeksu
@@ -239,7 +236,9 @@ export function QuizEditor({
     setShowValidation(true);
 
     if (!editorTitle || !editorTitle.trim()) {
-      setValidationError('Wpisz nazwę zestawu przed zapisaniem.');
+      const msg = 'Wpisz nazwę zestawu przed zapisaniem.';
+      setValidationError(msg);
+      toast.error('Nie można zapisać zestawu', msg);
       titleInputRef.current?.focus();
       return;
     }
@@ -248,7 +247,9 @@ export function QuizEditor({
       const issues = getQuestionIssues(editorQuestions[i], editorMode);
       if (issues.length > 0) {
         setSelectedIdx(i);
-        setValidationError(`Pytanie #${i + 1}: ${issues[0]}`);
+        const msg = `Pytanie #${i + 1}: ${issues[0]}`;
+        setValidationError(msg);
+        toast.error('Popraw błędy przed zapisem', msg);
         return;
       }
     }
@@ -286,12 +287,12 @@ export function QuizEditor({
     setEditorMode(nextMode);
     setValidationError('');
     if (convertedCount > 0) {
-      setModeNotice(
-        `Dostosowano ${convertedCount} ${convertedCount === 1 ? 'pytanie' : 'pytań'
-        } do wybranego trybu „${QUIZ_MODES[nextMode].fullLabel}”.`
+      toast.info(
+        'Dostosowano typy pytań',
+        `Przekonwertowano ${convertedCount} ${
+          convertedCount === 1 ? 'pytanie' : 'pytań'
+        } do trybu „${QUIZ_MODES[nextMode].fullLabel}”.`
       );
-    } else {
-      setModeNotice('');
     }
   };
 
@@ -403,6 +404,7 @@ export function QuizEditor({
       return copy;
     });
     setSelectedIdx(qIdx + 1);
+    toast.info('Zduplikowano pytanie', `Utworzono kopię jako pytanie #${qIdx + 2}.`);
   };
 
   const removeQuestion = (qIdx) => {
@@ -481,13 +483,20 @@ export function QuizEditor({
   const handleQuestionImageFile = async (qIdx, file) => {
     if (!file) return;
     const key = `q-${qIdx}`;
-    setImageError('');
+    const hadImage = Boolean(editorQuestions[qIdx]?.image);
     setProcessingKey(key);
     try {
       const dataUrl = await processImageFile(file, QUESTION_IMAGE_OPTIONS);
       updateEditorQuestion(qIdx, 'image', dataUrl);
+      toast.success(
+        hadImage ? 'Zmieniono zdjęcie pytania' : 'Dodano zdjęcie do pytania',
+        `Pytanie #${qIdx + 1} (${file.name})`
+      );
     } catch (err) {
-      setImageError(err.message || 'Nie udało się dodać zdjęcia do pytania.');
+      toast.error(
+        'Nie udało się dodać zdjęcia',
+        err.message || 'Nie udało się dodać zdjęcia do pytania.'
+      );
     } finally {
       setProcessingKey('');
     }
@@ -496,13 +505,21 @@ export function QuizEditor({
   const handleAnswerImageFile = async (qIdx, aIdx, file) => {
     if (!file) return;
     const key = `a-${qIdx}-${aIdx}`;
-    setImageError('');
+    const optLabel = ANSWER_OPTIONS[aIdx]?.label || `#${aIdx + 1}`;
+    const hadImage = Boolean(editorQuestions[qIdx]?.answerImages?.[aIdx]);
     setProcessingKey(key);
     try {
       const dataUrl = await processImageFile(file, ANSWER_IMAGE_OPTIONS);
       updateEditorAnswerImage(qIdx, aIdx, dataUrl);
+      toast.success(
+        hadImage ? 'Zmieniono zdjęcie odpowiedzi' : 'Dodano zdjęcie do odpowiedzi',
+        `Pytanie #${qIdx + 1}, odpowiedź ${optLabel} (${file.name})`
+      );
     } catch (err) {
-      setImageError(err.message || 'Nie udało się dodać zdjęcia do odpowiedzi.');
+      toast.error(
+        'Nie udało się dodać zdjęcia odpowiedzi',
+        err.message || 'Nie udało się dodać zdjęcia do odpowiedzi.'
+      );
     } finally {
       setProcessingKey('');
     }
@@ -627,7 +644,7 @@ export function QuizEditor({
           </div>
         </Card>
 
-        {/* KOMUNIKATY (WALIDACJA / ZDJĘCIA / ZMIANA TRYBU) */}
+        {/* KOMUNIKAT WALIDACJI */}
         {validationError && (
           <Alert
             variant="danger"
@@ -641,40 +658,6 @@ export function QuizEditor({
               onClick={() => setValidationError('')}
             >
               Zamknij
-            </Button>
-          </Alert>
-        )}
-
-        {imageError && (
-          <Alert
-            variant="danger"
-            className="flex items-center justify-between gap-3 text-sm font-heading font-bold"
-          >
-            <span>{imageError}</span>
-            <Button
-              type="button"
-              variant="neutral"
-              size="sm"
-              onClick={() => setImageError('')}
-            >
-              Zamknij
-            </Button>
-          </Alert>
-        )}
-
-        {modeNotice && (
-          <Alert
-            variant="info"
-            className="flex items-center justify-between gap-3 text-sm font-heading font-bold"
-          >
-            <span>{modeNotice}</span>
-            <Button
-              type="button"
-              variant="neutral"
-              size="sm"
-              onClick={() => setModeNotice('')}
-            >
-              OK
             </Button>
           </Alert>
         )}
@@ -1138,9 +1121,13 @@ export function QuizEditor({
                                 variant="danger"
                                 size="sm"
                                 className="h-8 text-xs"
-                                onClick={() =>
-                                  updateEditorQuestion(qIdx, 'image', null)
-                                }
+                                onClick={() => {
+                                  updateEditorQuestion(qIdx, 'image', null);
+                                  toast.neutral(
+                                    'Usunięto zdjęcie z pytania',
+                                    `Pytanie #${qIdx + 1}`
+                                  );
+                                }}
                               >
                                 Usuń zdjęcie
                               </Button>
@@ -1388,13 +1375,17 @@ export function QuizEditor({
                                       type="button"
                                       variant="danger"
                                       size="sm"
-                                      onClick={() =>
+                                      onClick={() => {
                                         updateEditorAnswerImage(
                                           qIdx,
                                           aIdx,
                                           null
-                                        )
-                                      }
+                                        );
+                                        toast.neutral(
+                                          'Usunięto zdjęcie z odpowiedzi',
+                                          `Pytanie #${qIdx + 1}, odpowiedź ${opt.label}`
+                                        );
+                                      }}
                                       title={`Usuń zdjęcie z opcji ${opt.label}`}
                                       aria-label={`Usuń zdjęcie z opcji ${opt.label}`}
                                       className="absolute right-1.5 top-1.5 h-7 w-7 px-0 text-xs"

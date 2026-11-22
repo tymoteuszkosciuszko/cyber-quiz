@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Badge, Button, cn } from './components/ui';
+import { Badge, Button, Toaster, toast, cn } from './components/ui';
 import {
   QUIZ_MODES,
   createEmptyQuestion,
@@ -40,12 +40,12 @@ const urlParams = new URLSearchParams(window.location.search);
 const initialPin = urlParams.get('pin') || '';
 
 export default function App() {
-  // Jeśli to osobne okno ekranu gry — renderujemy dedykowany widok rzutnika
-  if (isGameScreenRoute) {
-    return <GameScreenView pin={initialPin} />;
-  }
-
-  return <MainApp />;
+  return (
+    <>
+      {isGameScreenRoute ? <GameScreenView pin={initialPin} /> : <MainApp />}
+      <Toaster />
+    </>
+  );
 }
 
 function MainApp() {
@@ -189,6 +189,7 @@ function MainApp() {
       // ignore
     } finally {
       clearAuthState();
+      toast.info('Wylogowano', 'Twoja sesja została zakończona.');
     }
   }, [clearAuthState]);
 
@@ -478,6 +479,10 @@ function MainApp() {
       }
     } else {
       setPopupBlocked(true);
+      toast.warning(
+        'Zablokowano okno ekranu gry',
+        'Kliknij „Otwórz ekran gry” w panelu prowadzącego.'
+      );
     }
 
     socket.emit('host_create_room', { quizId: selectedQuizId }, (res) => {
@@ -485,9 +490,10 @@ function MainApp() {
         if (popup && !popup.closed) popup.close();
         if (res.error === 'UNAUTHORIZED') {
           clearAuthState();
+          toast.warning('Sesja wygasła', 'Zaloguj się ponownie.');
           return;
         }
-        alert(`Błąd: ${res.error}`);
+        toast.error('Nie udało się uruchomić sesji', res.error);
         return;
       }
 
@@ -500,6 +506,10 @@ function MainApp() {
       setConnectedScreens(0);
       setHostStatus('LOBBY');
       setMode('HOST');
+      toast.success(
+        'Uruchomiono sesję',
+        `Kod PIN pokoju: ${res.pin}`
+      );
 
       const screenUrl = `${window.location.origin}/game-screen?pin=${res.pin}`;
       if (popup && !popup.closed) {
@@ -532,6 +542,10 @@ function MainApp() {
     }
     socket.emit('host_abort_game', { pin: roomPin }, () => {
       resetHostStateToMenu();
+      toast.warning(
+        'Przerwano sesję',
+        'Wszyscy uczestnicy zostali rozłączeni.'
+      );
     });
   };
 
@@ -557,7 +571,10 @@ function MainApp() {
       if (!res.ok) throw new Error('Nie znaleziono zestawu');
       const quiz = await res.json();
       if (!quiz.canEdit) {
-        alert('Ten szablon jest tylko do odczytu. Sklonuj go, aby móc go edytować.');
+        toast.warning(
+          'Szablon tylko do odczytu',
+          'Sklonuj ten szablon, aby móc go edytować.'
+        );
         return;
       }
       const quizMode = QUIZ_MODES[quiz.mode] ? quiz.mode : 'quiz';
@@ -603,7 +620,7 @@ function MainApp() {
       );
       setMode('EDITOR');
     } catch (err) {
-      alert(`Błąd ładowania zestawu: ${err.message}`);
+      toast.error('Błąd ładowania zestawu', err.message);
     }
   };
 
@@ -669,12 +686,19 @@ function MainApp() {
         setEditingQuizId(null);
         setMode('MENU');
         fetchQuizzes();
+        toast.success(
+          isEditing ? 'Zapisano zmiany w zestawie' : 'Utworzono nowy zestaw',
+          saved.title || editorTitle
+        );
       } else {
         const errBody = await res.json().catch(() => ({}));
-        alert(`Nie udało się zapisać zestawu: ${errBody.error || res.statusText}`);
+        toast.error(
+          'Nie udało się zapisać zestawu',
+          errBody.error || res.statusText
+        );
       }
     } catch (_err) {
-      alert('Błąd zapisu zestawu');
+      toast.error('Błąd zapisu zestawu', 'Sprawdź połączenie z serwerem.');
     }
   };
 
@@ -688,29 +712,41 @@ function MainApp() {
         const cloned = await res.json();
         setSelectedQuizId(cloned.id);
         fetchQuizzes();
+        toast.success('Sklonowano zestaw', cloned.title);
       } else {
         const errBody = await res.json().catch(() => ({}));
-        alert(`Nie udało się sklonować zestawu: ${errBody.error || res.statusText}`);
+        toast.error(
+          'Nie udało się sklonować zestawu',
+          errBody.error || res.statusText
+        );
       }
     } catch {
-      alert('Błąd klonowania zestawu');
+      toast.error('Błąd klonowania zestawu', 'Sprawdź połączenie z serwerem.');
     }
   };
 
   // ─── Usuwanie quizu ───
   const deleteQuiz = async (quizId) => {
     if (!confirm('Czy na pewno chcesz usunąć ten zestaw?')) return;
+    const targetQuiz = quizzes.find((q) => q.id === quizId);
     try {
       const res = await apiFetch(`/api/quizzes/${quizId}`, { method: 'DELETE' });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        alert(`Nie udało się usunąć zestawu: ${errBody.error || res.statusText}`);
+        toast.error(
+          'Nie udało się usunąć zestawu',
+          errBody.error || res.statusText
+        );
         return;
       }
       fetchQuizzes();
       if (selectedQuizId === quizId) setSelectedQuizId('default-cyber-quiz');
+      toast.success(
+        'Usunięto zestaw',
+        targetQuiz?.title ? `Usunięto „${targetQuiz.title}”.` : undefined
+      );
     } catch (_err) {
-      alert('Błąd usuwania zestawu');
+      toast.error('Błąd usuwania zestawu', 'Sprawdź połączenie z serwerem.');
     }
   };
 
@@ -741,8 +777,9 @@ function MainApp() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      toast.success('Wyeksportowano zestaw do JSON', quiz.title);
     } catch (err) {
-      alert(`Błąd eksportu: ${err.message}`);
+      toast.error('Błąd eksportu', err.message);
     }
   };
 
@@ -815,13 +852,16 @@ function MainApp() {
         const saved = await res.json();
         setSelectedQuizId(saved.id);
         fetchQuizzes();
-        alert('Zestaw zaimportowany pomyślnie!');
+        toast.success(
+          'Zestaw zaimportowany pomyślnie',
+          saved.title || data.title
+        );
       } else {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || res.statusText);
       }
     } catch (err) {
-      alert(`Błąd importu: ${err.message}`);
+      toast.error('Błąd importu zestawu', err.message);
     }
     if (importFileRef.current) importFileRef.current.value = '';
   };
@@ -1102,10 +1142,11 @@ function MainApp() {
         )}
       </div>
 
-      {showSecurityModal && authUser && isFullyAuthenticatedAdmin && (
+      {authUser && isFullyAuthenticatedAdmin && (
         <AccountSecurityModal
+          open={showSecurityModal}
+          onOpenChange={setShowSecurityModal}
           user={authUser}
-          onClose={() => setShowSecurityModal(false)}
           onPasswordChanged={(updatedUser) => {
             setAuthUser(updatedUser);
             setAuthStatus('AUTHENTICATED');

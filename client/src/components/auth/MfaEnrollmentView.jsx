@@ -14,6 +14,7 @@ import {
   CardTitle,
   Input,
   Label,
+  toast,
 } from '../ui';
 import { apiJson, setCsrfToken } from '../../utils/api';
 import { describeWebAuthnError } from '../../utils/webauthnErrors';
@@ -103,6 +104,10 @@ export function MfaEnrollmentView({ user, onCompleted, onLogout, onSessionExpire
       setSuccess(
         `Zarejestrowano klucz "${verData.credential.name}". Zalecamy od razu dodać drugi klucz zapasowy (np. drugi YubiKey lub Touch ID).`
       );
+      toast.success(
+        'Zarejestrowano klucz bezpieczeństwa',
+        `Dodano klucz „${verData.credential.name}”.`
+      );
     } catch {
       setError('Błąd komunikacji z serwerem.');
     } finally {
@@ -185,6 +190,10 @@ export function MfaEnrollmentView({ user, onCompleted, onLogout, onSessionExpire
       setCurrentPassword('');
       setSuccess(
         `Dodano klucz zapasowy "${verData.credential.name}". Masz teraz ${verData.mfaCredentialsCount} zarejestrowane klucze.`
+      );
+      toast.success(
+        'Dodano klucz zapasowy',
+        `Klucz „${verData.credential.name}” został zarejestrowany.`
       );
     } catch {
       setError('Błąd komunikacji z serwerem.');

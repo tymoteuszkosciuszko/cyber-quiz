@@ -9,6 +9,7 @@ import {
   CardTitle,
   Input,
   Label,
+  toast,
 } from '../ui';
 import { apiJson, setCsrfToken } from '../../utils/api';
 
@@ -45,6 +46,7 @@ export function ForcePasswordChangeView({ user, onPasswordChanged, onLogout }) {
       }
 
       setCsrfToken(data.csrfToken);
+      toast.success('Hasło zostało ustawione', 'Zalogowano do panelu administratora.');
       onPasswordChanged({
         status: data.status || 'AUTHENTICATED',
         user: data.user,
