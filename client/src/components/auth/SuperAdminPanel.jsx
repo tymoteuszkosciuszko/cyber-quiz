@@ -11,6 +11,7 @@ import {
   Input,
   Label,
   Select,
+  toast,
 } from '../ui';
 import { apiJson } from '../../utils/api';
 
@@ -95,7 +96,9 @@ export function SuperAdminPanel({ onBack }) {
         body: { username: newUsername.trim() },
       });
       if (!res.ok) {
-        setError(data.message || data.error || 'Nie udało się utworzyć admina.');
+        const msg = data.message || data.error || 'Nie udało się utworzyć admina.';
+        setError(msg);
+        toast.error('Błąd tworzenia konta', msg);
         return;
       }
       setNewUsername('');
@@ -104,9 +107,15 @@ export function SuperAdminPanel({ onBack }) {
         password: data.temporaryPassword,
         action: 'Utworzono nowe konto administratora',
       });
+      toast.success(
+        'Utworzono konto administratora',
+        `Konto „${data.user.username}” jest gotowe. Skopiuj hasło tymczasowe.`
+      );
       fetchUsers();
     } catch {
-      setError('Błąd komunikacji z serwerem.');
+      const msg = 'Błąd komunikacji z serwerem.';
+      setError(msg);
+      toast.error('Błąd tworzenia konta', msg);
     } finally {
       setCreating(false);
     }
@@ -125,9 +134,15 @@ export function SuperAdminPanel({ onBack }) {
       body: { isActive: nextActive },
     });
     if (!res.ok) {
-      setError(data.message || data.error || 'Nie udało się zmienić statusu.');
+      const errMsg = data.message || data.error || 'Nie udało się zmienić statusu.';
+      setError(errMsg);
+      toast.error('Błąd zmiany statusu', errMsg);
       return;
     }
+    toast.success(
+      nextActive ? 'Aktywowano konto' : 'Dezaktywowano konto',
+      `Konto administratora „${u.username}”.`
+    );
     fetchUsers();
   };
 
@@ -148,7 +163,9 @@ export function SuperAdminPanel({ onBack }) {
       { method: 'POST' }
     );
     if (!res.ok) {
-      setError(data.message || data.error || 'Nie udało się zresetować hasła.');
+      const errMsg = data.message || data.error || 'Nie udało się zresetować hasła.';
+      setError(errMsg);
+      toast.error('Błąd resetowania hasła', errMsg);
       return;
     }
     setTempSecret({
@@ -156,6 +173,10 @@ export function SuperAdminPanel({ onBack }) {
       password: data.temporaryPassword,
       action: 'Wygenerowano nowe hasło tymczasowe',
     });
+    toast.warning(
+      'Zresetowano hasło',
+      `Wygenerowano nowe hasło tymczasowe dla „${data.username}”.`
+    );
     fetchUsers();
   };
 
@@ -172,9 +193,12 @@ export function SuperAdminPanel({ onBack }) {
       method: 'DELETE',
     });
     if (!res.ok) {
-      setError(data.message || data.error || 'Nie udało się usunąć konta.');
+      const errMsg = data.message || data.error || 'Nie udało się usunąć konta.';
+      setError(errMsg);
+      toast.error('Błąd usuwania konta', errMsg);
       return;
     }
+    toast.success('Usunięto konto administratora', `Usunięto konto „${u.username}”.`);
     fetchUsers();
   };
 
@@ -183,8 +207,10 @@ export function SuperAdminPanel({ onBack }) {
     try {
       await navigator.clipboard.writeText(tempSecret.password);
       setCopied(true);
+      toast.success('Skopiowano hasło tymczasowe');
     } catch {
       setCopied(false);
+      toast.error('Nie udało się skopiować hasła', 'Zaznacz i skopiuj je ręcznie.');
     }
   };
 

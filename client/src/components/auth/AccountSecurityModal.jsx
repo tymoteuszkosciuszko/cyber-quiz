@@ -7,13 +7,15 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
   Input,
   Label,
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+  toast,
 } from '../ui';
 import { apiJson, setCsrfToken } from '../../utils/api';
 import {
@@ -34,6 +36,8 @@ function formatShortDate(iso) {
 }
 
 export function AccountSecurityModal({
+  open = true,
+  onOpenChange,
   user,
   onClose,
   onPasswordChanged,
@@ -43,12 +47,21 @@ export function AccountSecurityModal({
   const isSuperAdmin = user.role === 'superadmin';
   const webAuthnSupported = browserSupportsWebAuthn();
 
+  const handleOpenChange = useCallback(
+    (nextOpen) => {
+      onOpenChange?.(nextOpen);
+      if (!nextOpen) {
+        onClose?.();
+      }
+    },
+    [onOpenChange, onClose]
+  );
+
   // Zmiana hasła
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   // Zarządzanie kluczami MFA (tylko superadmin)
@@ -59,7 +72,6 @@ export function AccountSecurityModal({
   const [maxCredentials, setMaxCredentials] = useState(10);
   const [loadingMfa, setLoadingMfa] = useState(isSuperAdmin);
   const [mfaError, setMfaError] = useState('');
-  const [mfaSuccess, setMfaSuccess] = useState('');
   const [mfaBusy, setMfaBusy] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [mfaPassword, setMfaPassword] = useState('');
@@ -85,14 +97,17 @@ export function AccountSecurityModal({
           if (data.maxCredentials) setMaxCredentials(data.maxCredentials);
           onMfaCountChangedRef.current?.(data.credentials.length);
         } else {
-          setMfaError(
+          const msg =
             data.message ||
-              data.error ||
-              'Nie udało się pobrać listy kluczy bezpieczeństwa.'
-          );
+            data.error ||
+            'Nie udało się pobrać listy kluczy bezpieczeństwa.';
+          setMfaError(msg);
+          toast.error('Błąd ładowania kluczy MFA', msg);
         }
       } catch {
-        setMfaError('Nie udało się pobrać listy kluczy bezpieczeństwa.');
+        const msg = 'Nie udało się pobrać listy kluczy bezpieczeństwa.';
+        setMfaError(msg);
+        toast.error('Błąd ładowania kluczy MFA', msg);
       } finally {
         setLoadingMfa(false);
       }
@@ -100,14 +115,28 @@ export function AccountSecurityModal({
     [isSuperAdmin]
   );
 
+  // Ładuj klucze przy otwarciu panelu, a przy zamknięciu czyść formularze i stany błędów
   useEffect(() => {
-    fetchMfaCredentials({ showLoading: true });
-  }, [fetchMfaCredentials]);
+    if (open) {
+      fetchMfaCredentials({ showLoading: true });
+    } else {
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setError('');
+      setMfaError('');
+      setNewKeyName('');
+      setMfaPassword('');
+      setEditingKeyId(null);
+      setEditingKeyName('');
+      setDeletingKeyId(null);
+      setDeletePassword('');
+    }
+  }, [open, fetchMfaCredentials]);
 
   const handleChangePassword = async (e) => {
     e.preventDefault();
     setError('');
-    setSuccess('');
 
     if (newPassword.length < 12) {
       setError('Nowe hasło musi mieć co najmniej 12 znaków.');
@@ -126,7 +155,10 @@ export function AccountSecurityModal({
       });
 
       if (!res.ok) {
-        setError(data.message || data.error || 'Nie udało się zmienić hasła.');
+        const msg =
+          data.message || data.error || 'Nie udało się zmienić hasła.';
+        setError(msg);
+        toast.error('Nie udało się zmienić hasła', msg);
         return;
       }
 
@@ -134,12 +166,15 @@ export function AccountSecurityModal({
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      setSuccess(
-        'Hasło zostało zmienione. Wszystkie pozostałe sesje zostały wylogowane.'
+      toast.success(
+        'Hasło zostało zmienione',
+        'Wszystkie pozostałe sesje zostały wylogowane.'
       );
       onPasswordChanged?.(data.user);
     } catch {
-      setError('Błąd komunikacji z serwerem.');
+      const msg = 'Błąd komunikacji z serwerem.';
+      setError(msg);
+      toast.error('Błąd zmiany hasła', msg);
     } finally {
       setSubmitting(false);
     }
@@ -148,7 +183,6 @@ export function AccountSecurityModal({
   const handleAddMfaKey = async (e) => {
     e.preventDefault();
     setMfaError('');
-    setMfaSuccess('');
 
     const trimmedName = newKeyName.trim();
     if (!trimmedName) {
@@ -171,11 +205,12 @@ export function AccountSecurityModal({
       );
 
       if (!optRes.ok || !optData.options) {
-        setMfaError(
+        const msg =
           optData.message ||
-            optData.error ||
-            'Nie udało się rozpocząć rejestracji klucza.'
-        );
+          optData.error ||
+          'Nie udało się rozpocząć rejestracji klucza.';
+        setMfaError(msg);
+        toast.error('Rejestracja klucza nie powiodła się', msg);
         return;
       }
 
@@ -183,7 +218,9 @@ export function AccountSecurityModal({
       try {
         attestation = await startRegistration({ optionsJSON: optData.options });
       } catch (webAuthnErr) {
-        setMfaError(describeWebAuthnError(webAuthnErr));
+        const msg = describeWebAuthnError(webAuthnErr);
+        setMfaError(msg);
+        toast.error('Przerwano rejestrację klucza', msg);
         return;
       }
 
@@ -196,20 +233,26 @@ export function AccountSecurityModal({
       );
 
       if (!verRes.ok) {
-        setMfaError(
+        const msg =
           verData.message ||
-            verData.error ||
-            'Rejestracja klucza bezpieczeństwa nie powiodła się.'
-        );
+          verData.error ||
+          'Rejestracja klucza bezpieczeństwa nie powiodła się.';
+        setMfaError(msg);
+        toast.error('Nie udało się zapisać klucza', msg);
         return;
       }
 
       setNewKeyName('');
       setMfaPassword('');
-      setMfaSuccess(`Dodano nowy klucz bezpieczeństwa: "${verData.credential.name}".`);
+      toast.success(
+        'Dodano nowy klucz bezpieczeństwa',
+        `Zarejestrowano klucz „${verData.credential.name}”.`
+      );
       fetchMfaCredentials();
     } catch {
-      setMfaError('Błąd komunikacji z serwerem.');
+      const msg = 'Błąd komunikacji z serwerem.';
+      setMfaError(msg);
+      toast.error('Błąd rejestracji klucza MFA', msg);
     } finally {
       setMfaBusy(false);
     }
@@ -217,7 +260,6 @@ export function AccountSecurityModal({
 
   const handleSaveRename = async (credId) => {
     setMfaError('');
-    setMfaSuccess('');
     const trimmed = editingKeyName.trim();
     if (!trimmed) {
       setMfaError('Nazwa klucza nie może być pusta.');
@@ -231,15 +273,20 @@ export function AccountSecurityModal({
         body: { name: trimmed },
       });
       if (!res.ok) {
-        setMfaError(data.message || data.error || 'Nie udało się zmienić nazwy.');
+        const msg =
+          data.message || data.error || 'Nie udało się zmienić nazwy.';
+        setMfaError(msg);
+        toast.error('Błąd zmiany nazwy klucza', msg);
         return;
       }
       setEditingKeyId(null);
       setEditingKeyName('');
-      setMfaSuccess('Zmieniono nazwę klucza.');
+      toast.success('Zmieniono nazwę klucza', `Nowa nazwa: „${trimmed}”.`);
       fetchMfaCredentials();
     } catch {
-      setMfaError('Błąd komunikacji z serwerem.');
+      const msg = 'Błąd komunikacji z serwerem.';
+      setMfaError(msg);
+      toast.error('Błąd zmiany nazwy klucza', msg);
     } finally {
       setMfaBusy(false);
     }
@@ -247,7 +294,6 @@ export function AccountSecurityModal({
 
   const handleDeleteMfaKey = async (cred) => {
     setMfaError('');
-    setMfaSuccess('');
     if (!deletePassword) {
       setMfaError('Podaj aktualne hasło, aby usunąć klucz.');
       return;
@@ -260,15 +306,20 @@ export function AccountSecurityModal({
         body: { currentPassword: deletePassword },
       });
       if (!res.ok) {
-        setMfaError(data.message || data.error || 'Nie udało się usunąć klucza.');
+        const msg =
+          data.message || data.error || 'Nie udało się usunąć klucza.';
+        setMfaError(msg);
+        toast.error('Błąd usuwania klucza', msg);
         return;
       }
       setDeletingKeyId(null);
       setDeletePassword('');
-      setMfaSuccess(`Usunięto klucz "${cred.name}".`);
+      toast.success('Usunięto klucz bezpieczeństwa', `Usunięto klucz „${cred.name}”.`);
       fetchMfaCredentials();
     } catch {
-      setMfaError('Błąd komunikacji z serwerem.');
+      const msg = 'Błąd komunikacji z serwerem.';
+      setMfaError(msg);
+      toast.error('Błąd usuwania klucza', msg);
     } finally {
       setMfaBusy(false);
     }
@@ -286,6 +337,10 @@ export function AccountSecurityModal({
       await apiJson('/api/auth/logout-all', { method: 'POST' });
     } finally {
       setCsrfToken(null);
+      toast.info(
+        'Wylogowano ze wszystkich urządzeń',
+        'Wszystkie aktywne sesje zostały unieważnione.'
+      );
       onLoggedOutAll?.();
     }
   };
@@ -294,31 +349,24 @@ export function AccountSecurityModal({
     mfaEnforcement === 'required' && mfaCredentials.length <= 1;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Bezpieczeństwo konta"
-    >
-      <Card
-        className={`w-full ${isSuperAdmin ? 'max-w-lg' : 'max-w-md'} max-h-[90vh] overflow-y-auto`}
+    <Sheet open={open} onOpenChange={handleOpenChange}>
+      <SheetContent
+        side="right"
+        className={isSuperAdmin ? 'sm:max-w-lg' : 'sm:max-w-md'}
       >
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
-          <div className="space-y-1">
-            <CardTitle className="flex items-center gap-2">
-              <span>Bezpieczeństwo konta</span>
-              <Badge variant={isSuperAdmin ? 'warning' : 'neutral'}>
-                {isSuperAdmin ? 'Superadmin' : 'Admin'}
-              </Badge>
-            </CardTitle>
-            <CardDescription>Zalogowano jako: {user.username}</CardDescription>
-          </div>
-          <Button type="button" variant="neutral" size="sm" onClick={onClose}>
-            ✕
-          </Button>
-        </CardHeader>
+        <SheetHeader>
+          <SheetTitle className="flex flex-wrap items-center gap-2">
+            <span>Ustawienia użytkownika</span>
+            <Badge variant={isSuperAdmin ? 'warning' : 'neutral'}>
+              {isSuperAdmin ? 'Superadmin' : 'Admin'}
+            </Badge>
+          </SheetTitle>
+          <SheetDescription>
+            Zalogowano jako: <strong>{user.username}</strong>
+          </SheetDescription>
+        </SheetHeader>
 
-        <CardContent className="space-y-6">
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
           {isSuperAdmin && (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -345,7 +393,6 @@ export function AccountSecurityModal({
               )}
 
               {mfaError && <Alert variant="danger">{mfaError}</Alert>}
-              {mfaSuccess && <Alert variant="default">{mfaSuccess}</Alert>}
 
               {loadingMfa ? (
                 <p className="text-xs text-foreground/75">Ładowanie kluczy...</p>
@@ -500,7 +547,7 @@ export function AccountSecurityModal({
               {mfaCredentials.length < maxCredentials && (
                 <form
                   onSubmit={handleAddMfaKey}
-                  className="rounded-base border-2 border-border bg-secondary-background p-3 space-y-2.5"
+                  className="rounded-base border-2 border-border bg-background p-3 space-y-2.5"
                 >
                   <div className="font-heading text-xs font-bold uppercase tracking-wide">
                     Dodaj nowy klucz (YubiKey / Touch ID / FIDO2)
@@ -564,14 +611,13 @@ export function AccountSecurityModal({
 
           <form
             onSubmit={handleChangePassword}
-            className={`${isSuperAdmin ? 'border-t-2 border-border pt-4 ' : ''}space-y-3`}
+            className={`${isSuperAdmin ? 'border-t-2 border-border pt-5 ' : ''}space-y-3`}
           >
             <h3 className="font-heading text-sm font-bold uppercase tracking-wide">
               Zmiana hasła
             </h3>
 
             {error && <Alert variant="danger">{error}</Alert>}
-            {success && <Alert variant="default">{success}</Alert>}
 
             <div className="space-y-1">
               <Label htmlFor="sec-current-pwd">Aktualne hasło</Label>
@@ -626,7 +672,7 @@ export function AccountSecurityModal({
             </Button>
           </form>
 
-          <div className="border-t-2 border-border pt-4 space-y-2">
+          <div className="border-t-2 border-border pt-5 space-y-2">
             <h3 className="font-heading text-sm font-bold uppercase tracking-wide">
               Aktywne sesje
             </h3>
@@ -644,8 +690,19 @@ export function AccountSecurityModal({
               Wyloguj ze wszystkich urządzeń
             </Button>
           </div>
-        </CardContent>
-      </Card>
-    </div>
+        </div>
+
+        <SheetFooter>
+          <Button
+            type="button"
+            variant="neutral"
+            size="sm"
+            onClick={() => handleOpenChange(false)}
+          >
+            Zamknij
+          </Button>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }

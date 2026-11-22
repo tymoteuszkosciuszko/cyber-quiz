@@ -14,4 +14,15 @@ export { Progress } from './Progress';
 export { Alert } from './Alert';
 export { Label } from './Label';
 export { Switch } from './Switch';
+export {
+  Sheet,
+  SheetOverlay,
+  SheetContent,
+  SheetHeader,
+  SheetFooter,
+  SheetTitle,
+  SheetDescription,
+  SheetClose,
+} from './Sheet';
+export { Toaster, toast } from './Toast';
 export { cn } from './utils';

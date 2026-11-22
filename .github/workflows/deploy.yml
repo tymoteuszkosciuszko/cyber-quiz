@@ -110,7 +110,7 @@ jobs:
         run: docker build -t cyber-quiz:ci .
 
   deploy:
-    name: Deploy to 2115.2115.xyz
+    name: Deploy to 21152115.xyz
     needs: test-and-build
     if: >-
       github.ref == 'refs/heads/main' &&

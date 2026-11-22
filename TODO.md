@@ -24,5 +24,5 @@
     - po wdrożeniu restart kontenera cyber-quiz i swag
 
 ## zmiany 4
-- okno ustawień użytkownika jako Sheet (wysuwany z prawej strony) (jest opisany w dokumentacji neobrutalism.dev)
-- powiadomienia różne (np. nieudany/udany upload zdjęć, zapisanie quizu i inne) jako Toast (wylatujące powiadomienie w prawym dolnym rogu) (jest opisany w dokumentacji neobrutalism.dev)
+- [x] okno ustawień użytkownika jako Sheet (wysuwany z prawej strony) (jest opisany w dokumentacji neobrutalism.dev)
+- [x] powiadomienia różne (np. nieudany/udany upload zdjęć, zapisanie quizu i inne) jako Toast (wylatujące powiadomienie w prawym dolnym rogu) (jest opisany w dokumentacji neobrutalism.dev)

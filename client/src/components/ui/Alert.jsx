@@ -5,6 +5,7 @@ const VARIANT_CLASSES = {
   neutral: 'bg-secondary-background text-foreground',
   danger: 'bg-danger text-foreground',
   warning: 'bg-warning text-foreground',
+  info: 'bg-info text-foreground',
 };
 
 export function Alert({ variant = 'default', className, children, ...props }) {

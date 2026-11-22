@@ -9,6 +9,7 @@ import {
   CardHeader,
   CardTitle,
   Progress,
+  toast,
   cn,
 } from './ui';
 import {
@@ -63,10 +64,24 @@ export function HostControlPanel({
   const playerUrl = `${window.location.origin}/?pin=${roomPin}`;
 
   const copyToClipboard = (text, key) => {
-    navigator.clipboard?.writeText(text).then(() => {
-      setCopiedKey(key);
-      setTimeout(() => setCopiedKey(''), 2000);
-    });
+    if (!navigator.clipboard?.writeText) {
+      toast.error('Nie udało się skopiować linku', 'Skopiuj adres ręcznie z paska.');
+      return;
+    }
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopiedKey(key);
+        toast.success(
+          key === 'screen'
+            ? 'Skopiowano link ekranu gry'
+            : 'Skopiowano link dla uczestników'
+        );
+        setTimeout(() => setCopiedKey(''), 2000);
+      })
+      .catch(() => {
+        toast.error('Nie udało się skopiować linku', 'Brak dostępu do schowka.');
+      });
   };
 
   const activeQuestionIndex = currentQuestion?.qIndex ?? -1;
