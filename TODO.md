@@ -18,7 +18,11 @@
 - [x] możliwość dodawania zdjęć do pytań i odpowiedzi
 
 ## zmiany 3
-- [ ] konfiguracja Github Action do automatycznego testowania, budowania i wdrażania aplikacji na serwerze 2115.2115.xyz:
+- [x] konfiguracja Github Action do automatycznego testowania, budowania i wdrażania aplikacji na serwerze 2115.2115.xyz:
     - po merge'u na main ma być uruchamiany skrypt, który testuje aplikację i buduje nową paczkę
     - jeśli testy przejdą pomyślnie, to skrypt ma się logować na serwer przez ssh (private key) i wdrażać nową paczkę (katalog ~/containers/cyber-quiz ze sklonowanym repo)
     - po wdrożeniu restart kontenera cyber-quiz i swag
+
+## zmiany 4
+- okno ustawień użytkownika jako Sheet (wysuwany z prawej strony) (jest opisany w dokumentacji neobrutalism.dev)
+- powiadomienia różne (np. nieudany/udany upload zdjęć, zapisanie quizu i inne) jako Toast (wylatujące powiadomienie w prawym dolnym rogu) (jest opisany w dokumentacji neobrutalism.dev)

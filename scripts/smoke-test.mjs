@@ -482,7 +482,9 @@ async function runTests(
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(res.headers.get('x-powered-by'), null);
-    assert.ok(res.headers.get('content-security-policy'));
+    const csp = res.headers.get('content-security-policy');
+    assert.ok(csp);
+    assert.match(csp, /img-src[^;]*\bblob:/);
     const body = await res.json();
     assert.equal(body.status, 'ok');
     assert.equal(body.redis, 'ready');
