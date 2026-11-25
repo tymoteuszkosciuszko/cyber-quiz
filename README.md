@@ -214,3 +214,4 @@ cyber-quiz/
             ├── PlayerView.jsx        # Interfejs gracza (smartfon)
             └── ui/                   # Komponenty UI (Button, Card, Badge, Progress, Alert…)
 ```
+<!-- test >
