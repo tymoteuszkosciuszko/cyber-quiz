@@ -469,7 +469,9 @@ export function PlayerView({
             <>
               <div className="rounded-base border-2 border-border bg-info p-4 shadow-shadow space-y-1">
                 <div className="font-heading text-2xl font-extrabold">
-                  {playerResult.submitted
+                  {playerResult.lateJoin
+                    ? 'Dołączono do gry!'
+                    : playerResult.submitted
                     ? 'Dziękujemy za głos!'
                     : 'Czas minął'}
                 </div>
@@ -480,7 +482,9 @@ export function PlayerView({
                 )}
               </div>
               <p className="text-sm text-foreground/75">
-                Spójrz na ekran główny, aby zobaczyć zbiorcze wyniki wszystkich uczestników.
+                {playerResult.lateJoin
+                  ? 'Spójrz na ekran główny — kolejne pytanie pojawi się za chwilę.'
+                  : 'Spójrz na ekran główny, aby zobaczyć zbiorcze wyniki wszystkich uczestników.'}
               </p>
               {playerResult.sessionMode === 'mixed' && (
                 <div className="flex items-center justify-center gap-2 pt-1">

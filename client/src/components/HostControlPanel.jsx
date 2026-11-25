@@ -8,7 +8,9 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Label,
   Progress,
+  Switch,
   toast,
   cn,
 } from './ui';
@@ -39,12 +41,15 @@ export function HostControlPanel({
   answerCount,
   leaderboardData,
   autoNextSeconds,
+  autoAdvanceEnabled = true,
   allResults,
   sessionEndMeta,
   onOpenGameScreen,
   onStartGame,
   onForceNext,
   onTogglePause,
+  onSetAutoAdvance,
+  onGoToQuestion,
   onAbortGame,
   onFinishSession,
 }) {
@@ -179,6 +184,30 @@ export function HostControlPanel({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* PRZEŁĄCZNIK AUTOMATYCZNEGO PRZEŁĄCZANIA PYTAŃ */}
+              {hostStatus !== 'PODIUM' && (
+                <div className="flex items-center justify-between gap-3 rounded-base border-2 border-border bg-background p-3">
+                  <div className="space-y-0.5 min-w-0">
+                    <Label
+                      htmlFor="host-auto-advance-switch"
+                      className="text-sm font-heading font-bold cursor-pointer"
+                    >
+                      Automatyczne przełączanie pytań
+                    </Label>
+                    <p className="text-xs text-foreground/75">
+                      {autoAdvanceEnabled
+                        ? 'Po wynikach następuje automatyczne przejście do kolejnego pytania.'
+                        : 'Tryb ręczny — przełączaj pytania samodzielnie przyciskami.'}
+                    </p>
+                  </div>
+                  <Switch
+                    id="host-auto-advance-switch"
+                    checked={autoAdvanceEnabled}
+                    onCheckedChange={(checked) => onSetAutoAdvance?.(checked)}
+                  />
+                </div>
+              )}
+
               {/* LOBBY */}
               {hostStatus === 'LOBBY' && (
                 <div className="space-y-3">
@@ -263,6 +292,33 @@ export function HostControlPanel({
                   >
                     ⏭ Rozpocznij odpowiadanie teraz →
                   </Button>
+
+                  {!autoAdvanceEnabled && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant="neutral"
+                        size="default"
+                        disabled={activeQuestionIndex <= 0}
+                        onClick={() => onGoToQuestion?.(activeQuestionIndex - 1)}
+                      >
+                        ← Poprzednie
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="neutral"
+                        size="default"
+                        onClick={() => onGoToQuestion?.(activeQuestionIndex + 1)}
+                      >
+                        {activeQuestionIndex + 1 >=
+                          (activeQuiz?.questions?.length || 0)
+                          ? quizMode === 'opinion'
+                            ? 'Podsumowanie →'
+                            : 'Podium →'
+                          : 'Następne →'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -270,18 +326,23 @@ export function HostControlPanel({
               {hostStatus === 'QUESTION' && currentQuestion && (
                 <div className="space-y-4">
                   <div className="rounded-base border-2 border-border bg-background p-4 space-y-3">
-                    <div className="flex items-center justify-between text-xs font-heading font-bold uppercase">
-                      <span>Pozostały czas</span>
-                      <span className="tabular-nums">{timeLeft.toFixed(1)} s</span>
-                    </div>
-                    <Progress
-                      value={
-                        currentQuestion.timeLimit > 0
-                          ? (timeLeft / currentQuestion.timeLimit) * 100
-                          : 0
-                      }
-                      indicatorClassName={timeLeft <= 5 ? 'bg-danger' : 'bg-main'}
-                    />
+                    {currentQuestion.timeLimit > 0 ? (
+                      <>
+                        <div className="flex items-center justify-between text-xs font-heading font-bold uppercase">
+                          <span>Pozostały czas</span>
+                          <span className="tabular-nums">{timeLeft.toFixed(1)} s</span>
+                        </div>
+                        <Progress
+                          value={(timeLeft / currentQuestion.timeLimit) * 100}
+                          indicatorClassName={timeLeft <= 5 ? 'bg-danger' : 'bg-main'}
+                        />
+                      </>
+                    ) : (
+                      <div className="flex items-center justify-between text-xs font-heading font-bold uppercase">
+                        <span>Czas odpowiedzi</span>
+                        <Badge variant="info">∞ Bez limitu</Badge>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between pt-1 text-sm font-heading font-bold">
                       <span>Zebrane odpowiedzi:</span>
                       <Badge variant="neutral" className="tabular-nums">
@@ -298,49 +359,116 @@ export function HostControlPanel({
                   >
                     ⏭ Zakończ pytanie i pokaż wyniki →
                   </Button>
+
+                  {!autoAdvanceEnabled && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant="neutral"
+                        size="default"
+                        disabled={activeQuestionIndex <= 0}
+                        onClick={() => onGoToQuestion?.(activeQuestionIndex - 1)}
+                      >
+                        ← Poprzednie
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="neutral"
+                        size="default"
+                        onClick={() => onGoToQuestion?.(activeQuestionIndex + 1)}
+                      >
+                        {activeQuestionIndex + 1 >=
+                          (activeQuiz?.questions?.length || 0)
+                          ? quizMode === 'opinion'
+                            ? 'Podsumowanie →'
+                            : 'Podium →'
+                          : 'Następne →'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* LEADERBOARD */}
               {hostStatus === 'LEADERBOARD' && leaderboardData && (
                 <div className="space-y-3">
-                  <div className="rounded-base border-2 border-border bg-background p-4 flex items-center justify-between gap-2">
-                    <span className="text-xs font-heading font-bold uppercase text-foreground/75">
-                      Automatyczne przejście
-                    </span>
-                    {leaderboardData.isPaused ? (
-                      <Badge variant="warning">Wstrzymane</Badge>
-                    ) : (
-                      <Badge variant="neutral" className="tabular-nums">
-                        za {autoNextSeconds} s
-                      </Badge>
-                    )}
-                  </div>
+                  {autoAdvanceEnabled ? (
+                    <>
+                      <div className="rounded-base border-2 border-border bg-background p-4 flex items-center justify-between gap-2">
+                        <span className="text-xs font-heading font-bold uppercase text-foreground/75">
+                          Automatyczne przejście
+                        </span>
+                        {leaderboardData.isPaused ? (
+                          <Badge variant="warning">Wstrzymane</Badge>
+                        ) : (
+                          <Badge variant="neutral" className="tabular-nums">
+                            za {autoNextSeconds} s
+                          </Badge>
+                        )}
+                      </div>
 
-                  <Button
-                    type="button"
-                    size="lg"
-                    onClick={onForceNext}
-                    className="w-full"
-                  >
-                    {leaderboardData.isLastQuestion
-                      ? quizMode === 'opinion'
-                        ? '✓ Przejdź do podsumowania →'
-                        : '🏆 Przejdź do podium →'
-                      : '⏭ Przewiń do następnego pytania →'}
-                  </Button>
+                      <Button
+                        type="button"
+                        size="lg"
+                        onClick={onForceNext}
+                        className="w-full"
+                      >
+                        {leaderboardData.isLastQuestion
+                          ? quizMode === 'opinion'
+                            ? '✓ Przejdź do podsumowania →'
+                            : 'Przejdź do podium →'
+                          : '⏭ Przewiń do następnego pytania →'}
+                      </Button>
 
-                  <Button
-                    type="button"
-                    variant="neutral"
-                    size="default"
-                    onClick={onTogglePause}
-                    className="w-full"
-                  >
-                    {leaderboardData.isPaused
-                      ? '▶ Wznów automatyczne przejście'
-                      : '⏸ Wstrzymaj automatyczne przejście'}
-                  </Button>
+                      <Button
+                        type="button"
+                        variant="neutral"
+                        size="default"
+                        onClick={onTogglePause}
+                        className="w-full"
+                      >
+                        {leaderboardData.isPaused
+                          ? '▶ Wznów automatyczne przejście'
+                          : '⏸ Wstrzymaj automatyczne przejście'}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="rounded-base border-2 border-border bg-background p-4 flex items-center justify-between gap-2">
+                        <span className="text-xs font-heading font-bold uppercase text-foreground/75">
+                          Przełączanie pytań
+                        </span>
+                        <Badge variant="info">Tryb ręczny</Badge>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <Button
+                          type="button"
+                          variant="neutral"
+                          size="lg"
+                          disabled={activeQuestionIndex <= 0}
+                          onClick={() =>
+                            onGoToQuestion?.(activeQuestionIndex - 1)
+                          }
+                          className="w-full"
+                        >
+                          ← Poprzednie
+                        </Button>
+                        <Button
+                          type="button"
+                          size="lg"
+                          onClick={onForceNext}
+                          className="w-full"
+                        >
+                          {leaderboardData.isLastQuestion
+                            ? quizMode === 'opinion'
+                              ? '✓ Podsumowanie →'
+                              : 'Podium →'
+                            : 'Następne →'}
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -413,8 +541,8 @@ export function HostControlPanel({
                           isCurrent
                             ? 'bg-main font-bold'
                             : isDone
-                            ? 'bg-background opacity-75'
-                            : 'bg-secondary-background'
+                              ? 'bg-background opacity-75'
+                              : 'bg-secondary-background'
                         )}
                       >
                         <Badge
@@ -422,8 +550,8 @@ export function HostControlPanel({
                             isCurrent
                               ? 'warning'
                               : isDone
-                              ? 'default'
-                              : 'neutral'
+                                ? 'default'
+                                : 'neutral'
                           }
                           className="flex-shrink-0 text-[11px] px-1.5 py-0"
                         >
@@ -555,7 +683,7 @@ export function HostControlPanel({
                           const ansImg = activeQuizQuestion.answerImages?.[idx];
                           const distCount =
                             hostStatus === 'LEADERBOARD' &&
-                            leaderboardData?.distribution
+                              leaderboardData?.distribution
                               ? leaderboardData.distribution[idx]
                               : null;
 
@@ -624,7 +752,7 @@ export function HostControlPanel({
                   {/* SLIDER: podgląd przedziału lub wyniki */}
                   {activeQType === 'slider' &&
                     (hostStatus === 'LEADERBOARD' &&
-                    leaderboardData?.sliderStats ? (
+                      leaderboardData?.sliderStats ? (
                       <SliderResults
                         sliderStats={leaderboardData.sliderStats}
                         scored={activeQScored}
@@ -653,7 +781,7 @@ export function HostControlPanel({
                   {/* CHMURA SŁÓW: info lub wyniki */}
                   {activeQType === 'word_cloud' &&
                     (hostStatus === 'LEADERBOARD' &&
-                    leaderboardData?.wordCloud ? (
+                      leaderboardData?.wordCloud ? (
                       <WordCloud
                         entries={leaderboardData.wordCloud}
                         totalResponses={leaderboardData.totalResponses}
@@ -836,10 +964,10 @@ export function HostControlPanel({
                                   p.place === 1
                                     ? 'warning'
                                     : p.place === 2
-                                    ? 'info'
-                                    : p.place === 3
-                                    ? 'purple'
-                                    : 'neutral'
+                                      ? 'info'
+                                      : p.place === 3
+                                        ? 'purple'
+                                        : 'neutral'
                                 }
                                 className="min-w-[2.5rem] tabular-nums"
                               >

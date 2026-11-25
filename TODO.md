@@ -26,3 +26,7 @@
 ## zmiany 4
 - [x] okno ustawień użytkownika jako Sheet (wysuwany z prawej strony) (jest opisany w dokumentacji neobrutalism.dev)
 - [x] powiadomienia różne (np. nieudany/udany upload zdjęć, zapisanie quizu i inne) jako Toast (wylatujące powiadomienie w prawym dolnym rogu) (jest opisany w dokumentacji neobrutalism.dev)
+
+## zmiany 5
+- [x] przełącznik w panelu sterowania rozrywką do włączania i wyłączania automatycznego przełączania pytań (po wyłączeniu automatycznego przełączania pokazują się przyciski do ich przełączania ręcznego)
+- [x] możliwość dołączenia do gry w trakcie jej trwania (aplikacja ma nie zwracać użytkownikowi błędu o tym, że gra już trwa)

@@ -237,10 +237,19 @@ function normalizeAndValidateQuestions(rawQuestions, rawMode = 'quiz') {
       return { error: 'EMPTY_QUESTION' };
     }
 
-    const rawTime = Number(raw.timeLimit);
-    const timeLimit = Number.isFinite(rawTime)
-      ? Math.min(120, Math.max(5, Math.round(rawTime)))
-      : 20;
+    let timeLimit = 20;
+    if (
+      raw.timeLimit === 0 ||
+      raw.timeLimit === '0' ||
+      raw.timeLimit === null
+    ) {
+      timeLimit = 0;
+    } else if (raw.timeLimit !== undefined && raw.timeLimit !== '') {
+      const rawTime = Number(raw.timeLimit);
+      if (Number.isFinite(rawTime)) {
+        timeLimit = Math.min(120, Math.max(5, Math.round(rawTime)));
+      }
+    }
 
     const scored = resolveQuestionScored({ ...raw, type }, mode);
     const questionObj = {
@@ -844,6 +853,7 @@ async function buildRoomSnapshot(pin) {
     hasScoredQuestions,
     totalQuestions: quiz?.questions.length || 0,
     players: fullResults.map((p) => p.nickname),
+    autoAdvanceEnabled: state.auto_advance_enabled !== '0',
   };
 
   if (state.status === 'COUNTDOWN') {
@@ -875,6 +885,7 @@ async function buildRoomSnapshot(pin) {
   if (state.status === 'QUESTION' && quiz && quiz.questions[qIndex]) {
     const question = quiz.questions[qIndex];
     const currentCount = await redis.hlen(`room:${pin}:answers:${qIndex}`);
+    const hasLimit = Number(question.timeLimit) > 0;
     return {
       ...base,
       currentQuestion: buildHostQuestionPayload(
@@ -885,7 +896,7 @@ async function buildRoomSnapshot(pin) {
         sessionMode,
         true
       ),
-      timeLeft: +(remainingMs / 1000).toFixed(1),
+      timeLeft: hasLimit ? +(remainingMs / 1000).toFixed(1) : 0,
       answerCount: { count: currentCount, total: totalPlayers },
     };
   }
@@ -900,7 +911,8 @@ async function buildRoomSnapshot(pin) {
     } catch (_err) {
       // fallback empty
     }
-    const isPaused = state.auto_next_paused === '1';
+    const autoAdvanceEnabled = state.auto_advance_enabled !== '0';
+    const isPaused = autoAdvanceEnabled && state.auto_next_paused === '1';
     const qType = resolveQuestionType(question);
     const scored = resolveQuestionScored(question, sessionMode);
 
@@ -929,9 +941,10 @@ async function buildRoomSnapshot(pin) {
         uniqueCount: savedResult.uniqueCount || 0,
         totalResponses: savedResult.totalResponses || 0,
         topPlayers: scored ? fullResults.slice(0, 5) : [],
-        autoNextIn: isPaused ? 0 : Math.ceil(remainingMs / 1000),
+        autoNextIn: !autoAdvanceEnabled || isPaused ? 0 : Math.ceil(remainingMs / 1000),
         isLastQuestion: qIndex + 1 >= quiz.questions.length,
         isPaused,
+        autoAdvanceEnabled,
       },
     };
   }
@@ -966,6 +979,17 @@ async function startQuestionPreview(pin, qIndex) {
   const scored = resolveQuestionScored(question, sessionMode);
   const now = Date.now();
   const previewDurationMs = QUESTION_PREVIEW_SECONDS * 1000;
+
+  // Jeśli wracamy do już rozegranego pytania, odejmij punkty zdobyte wcześniej w tej rundzie
+  const prevEarned = await redis.hgetall(`room:${pin}:earned:${qIndex}`);
+  if (prevEarned) {
+    for (const [nick, pts] of Object.entries(prevEarned)) {
+      const numPts = Number(pts);
+      if (numPts > 0) {
+        await redis.zincrby(`room:${pin}:leaderboard`, -numPts, nick);
+      }
+    }
+  }
 
   // Wyczyść odpowiedzi dla tego indeksu pytania
   await redis.del(`room:${pin}:answers:${qIndex}`);
@@ -1039,7 +1063,8 @@ async function revealAnswersAndStartQuestion(pin, qIndex) {
   const qType = resolveQuestionType(question);
   const scored = resolveQuestionScored(question, sessionMode);
   const now = Date.now();
-  const timeLimitMs = question.timeLimit * 1000;
+  const hasTimeLimit = Number(question.timeLimit) > 0;
+  const timeLimitMs = hasTimeLimit ? question.timeLimit * 1000 : 0;
 
   // Zapisz stan aktywnego pytania w Redisie (punktacja liczona od ujawnienia odpowiedzi!)
   await redis.hmset(`room:${pin}:state`, {
@@ -1094,20 +1119,28 @@ async function revealAnswersAndStartQuestion(pin, qIndex) {
   io.to(`players:${pin}`).emit('player_question_start', playerPayload);
 
   let lastBroadcastCount = 0;
+  let lastBroadcastTotal = totalPlayers;
 
   // Throttling: wysyłanie liczby odpowiedzi do hosta i ekranu maksymalnie raz na 250 ms
   const throttleInterval = setInterval(async () => {
     try {
-      const currentCount = await redis.hlen(`room:${pin}:answers:${qIndex}`);
-      if (currentCount !== lastBroadcastCount) {
+      const [currentCount, liveTotalPlayers] = await Promise.all([
+        redis.hlen(`room:${pin}:answers:${qIndex}`),
+        redis.zcard(`room:${pin}:leaderboard`),
+      ]);
+      if (
+        currentCount !== lastBroadcastCount ||
+        liveTotalPlayers !== lastBroadcastTotal
+      ) {
         lastBroadcastCount = currentCount;
+        lastBroadcastTotal = liveTotalPlayers;
         io.to(`host:${pin}`).emit('answer_count_update', {
           count: currentCount,
-          total: totalPlayers,
+          total: liveTotalPlayers,
         });
       }
       // Jeśli wszyscy gracze odpowiedzieli, kończymy pytanie przed czasem
-      if (totalPlayers > 0 && currentCount >= totalPlayers) {
+      if (liveTotalPlayers > 0 && currentCount >= liveTotalPlayers) {
         endQuestion(pin, qIndex);
       }
     } catch (_err) {
@@ -1115,10 +1148,12 @@ async function revealAnswersAndStartQuestion(pin, qIndex) {
     }
   }, 250);
 
-  // Główny timer pytania — automatyczne zakończenie po upływie czasu
-  const questionTimer = setTimeout(() => {
-    endQuestion(pin, qIndex);
-  }, timeLimitMs);
+  // Główny timer pytania — automatyczne zakończenie po upływie czasu (gdy ustawiono limit)
+  const questionTimer = hasTimeLimit
+    ? setTimeout(() => {
+        endQuestion(pin, qIndex);
+      }, timeLimitMs)
+    : null;
 
   roomTimers.set(pin, { questionTimer, throttleInterval });
 }
@@ -1229,6 +1264,7 @@ async function endQuestion(pin, qIndex) {
   const isLastQuestion = qIndex + 1 >= quiz.questions.length;
 
   // Wysłanie wyników rundy do Hosta i Ekranu gry
+  const autoAdvEnabled = state.auto_advance_enabled !== '0';
   io.to(`host:${pin}`).emit('host_question_end', {
     qIndex,
     questionType: qType,
@@ -1241,9 +1277,10 @@ async function endQuestion(pin, qIndex) {
     uniqueCount,
     totalResponses,
     topPlayers,
-    autoNextIn: AUTO_NEXT_SECONDS,
+    autoNextIn: autoAdvEnabled ? AUTO_NEXT_SECONDS : 0,
     isLastQuestion,
     isPaused: false,
+    autoAdvanceEnabled: autoAdvEnabled,
   });
 
   // Wysłanie indywidualnego statusu do każdego gracza
@@ -1319,11 +1356,15 @@ async function endQuestion(pin, qIndex) {
   }
 
   // Automatyczne przełączenie do kolejnego pytania (podgląd) po 6 sekundach
-  const autoNextTimer = setTimeout(() => {
-    startQuestionPreview(pin, qIndex + 1);
-  }, AUTO_NEXT_SECONDS * 1000);
+  // — tylko jeśli auto-advance jest włączone
+  const autoAdvanceEnabled = state.auto_advance_enabled !== '0';
+  if (autoAdvanceEnabled) {
+    const autoNextTimer = setTimeout(() => {
+      startQuestionPreview(pin, qIndex + 1);
+    }, AUTO_NEXT_SECONDS * 1000);
 
-  roomTimers.set(pin, { autoNextTimer });
+    roomTimers.set(pin, { autoNextTimer });
+  }
 }
 
 async function finishQuiz(pin) {
@@ -1482,6 +1523,7 @@ io.on('connection', (socket) => {
         current_q_index: -1,
         host_socket_id: socket.id,
         auto_next_paused: '0',
+        auto_advance_enabled: '1',
       });
       // TTL na klucze pokoju (2 godziny)
       await redis.expire(`room:${pin}:state`, 7200);
@@ -1539,6 +1581,7 @@ io.on('connection', (socket) => {
   });
 
   // 2. Gracz dołącza do pokoju (przez kod QR lub PIN + Nickname)
+  //    — dozwolone zarówno w LOBBY jak i w trakcie trwania gry
   socket.on('player_join', async ({ pin, nickname }, callback) => {
     try {
       const cleanNick = (nickname || '').trim().toUpperCase().slice(0, 16);
@@ -1550,8 +1593,8 @@ io.on('connection', (socket) => {
       const state = await redis.hgetall(`room:${cleanPin}:state`);
       if (!state || !state.status)
         return callback({ error: 'ROOM_NOT_FOUND' });
-      if (state.status !== 'LOBBY')
-        return callback({ error: 'GAME_ALREADY_IN_PROGRESS' });
+      if (state.status === 'ABORTED' || state.status === 'PODIUM')
+        return callback({ error: 'GAME_ALREADY_FINISHED' });
 
       // Sprawdzenie duplikatu nicka w czasie O(1) — Redis ZSCORE
       const existing = await redis.zscore(
@@ -1575,7 +1618,111 @@ io.on('connection', (socket) => {
         totalPlayers,
       });
 
-      callback({ success: true, nickname: cleanNick });
+      // Jeśli gra jest w trakcie, przygotuj aktualny stan rozgrywki dla gracza
+      let gameState = { status: state.status };
+
+      if (state.status !== 'LOBBY') {
+        const qIndex = Number(state.current_q_index ?? -1);
+        const quiz = await getActiveRoomQuiz(cleanPin, state.quiz_id);
+
+        if (state.status === 'COUNTDOWN') {
+          const now = Date.now();
+          const phaseStart = Number(state.phase_start_timestamp || 0);
+          const phaseDuration = Number(state.phase_duration_ms || 0);
+          const remainingMs = Math.max(0, phaseDuration - (now - phaseStart));
+          gameState = {
+            status: 'COUNTDOWN',
+            payload: {
+              seconds: Math.max(1, Math.ceil(remainingMs / 1000)),
+            },
+          };
+        } else if (
+          state.status === 'QUESTION_PREVIEW' &&
+          quiz &&
+          quiz.questions[qIndex]
+        ) {
+          const question = quiz.questions[qIndex];
+          const qType = resolveQuestionType(question);
+          const scored = resolveQuestionScored(question, quiz.mode || 'quiz');
+          const now = Date.now();
+          const phaseStart = Number(state.phase_start_timestamp || 0);
+          const phaseDuration = Number(state.phase_duration_ms || 0);
+          const remainingMs = Math.max(0, phaseDuration - (now - phaseStart));
+          gameState = {
+            status: 'QUESTION_PREVIEW',
+            payload: {
+              qIndex,
+              totalQuestions: quiz.questions.length,
+              previewDuration: QUESTION_PREVIEW_SECONDS,
+              previewRemaining: +(remainingMs / 1000).toFixed(1),
+              questionType: qType,
+              scored,
+            },
+          };
+        } else if (
+          state.status === 'QUESTION' &&
+          quiz &&
+          quiz.questions[qIndex]
+        ) {
+          const question = quiz.questions[qIndex];
+          const qType = resolveQuestionType(question);
+          const scored = resolveQuestionScored(question, quiz.mode || 'quiz');
+          const now = Date.now();
+          const phaseStart = Number(state.phase_start_timestamp || 0);
+          const phaseDuration = Number(state.phase_duration_ms || 0);
+          const remainingMs = Math.max(0, phaseDuration - (now - phaseStart));
+          const hasTimeLimit = Number(question.timeLimit) > 0;
+          const playerPayload = {
+            qIndex,
+            questionType: qType,
+            scored,
+            timeLimit: question.timeLimit,
+            timeRemaining: hasTimeLimit ? +(remainingMs / 1000).toFixed(1) : 0,
+          };
+          if (qType === 'abcd' || qType === 'poll') {
+            playerPayload.optionsCount = question.answers.length;
+          } else if (qType === 'true_false') {
+            playerPayload.optionsCount = 2;
+            playerPayload.labels = question.answers;
+          } else if (qType === 'slider') {
+            playerPayload.sliderMin = question.sliderMin;
+            playerPayload.sliderMax = question.sliderMax;
+            playerPayload.sliderStep = question.sliderStep;
+            playerPayload.sliderUnit = question.sliderUnit || '';
+          } else if (qType === 'word_cloud') {
+            playerPayload.maxLength = question.maxLength || 32;
+          }
+          gameState = { status: 'QUESTION', payload: playerPayload };
+
+          // Zaktualizuj licznik uczestników dla bieżącego pytania na hoście i ekranie gry
+          const currentCount = await redis.hlen(`room:${cleanPin}:answers:${qIndex}`);
+          io.to(`host:${cleanPin}`).emit('answer_count_update', {
+            count: currentCount,
+            total: totalPlayers,
+          });
+        } else if (state.status === 'LEADERBOARD') {
+          gameState = {
+            status: 'LEADERBOARD',
+            payload: {
+              questionType: state.current_q_type || 'abcd',
+              scored: false,
+              sessionMode: quiz?.mode || state.quiz_mode || 'quiz',
+              submitted: false,
+              submittedDisplay: null,
+              score: 0,
+              rank: totalPlayers,
+              lateJoin: true,
+            },
+          };
+        }
+      }
+
+      callback({
+        success: true,
+        pin: cleanPin,
+        nickname: cleanNick,
+        gameState,
+      });
     } catch (err) {
       callback({ error: err.message });
     }
@@ -1646,7 +1793,9 @@ io.on('connection', (socket) => {
       return socket.emit('host_auth_error', { error: auth.error });
     }
     const { state } = auth;
-    if (state.status !== 'LEADERBOARD') return;
+    if (state.status !== 'LEADERBOARD' || state.auto_advance_enabled === '0') {
+      return callback?.({ success: false });
+    }
 
     const currentIdx = Number(state.current_q_index);
     const isCurrentlyPaused = state.auto_next_paused === '1';
@@ -1657,6 +1806,7 @@ io.on('connection', (socket) => {
       io.to(`host:${pin}`).emit('host_auto_next_status', {
         isPaused: true,
         autoNextIn: 0,
+        autoAdvanceEnabled: true,
       });
     } else {
       clearRoomTimers(pin);
@@ -1669,11 +1819,93 @@ io.on('connection', (socket) => {
       io.to(`host:${pin}`).emit('host_auto_next_status', {
         isPaused: false,
         autoNextIn: AUTO_NEXT_SECONDS,
+        autoAdvanceEnabled: true,
       });
       const autoNextTimer = setTimeout(() => {
         startQuestionPreview(pin, currentIdx + 1);
       }, AUTO_NEXT_SECONDS * 1000);
       roomTimers.set(pin, { autoNextTimer });
+    }
+    callback?.({ success: true });
+  });
+
+  // 4b2. Włączanie/wyłączanie automatycznego przełączania pytań przez prowadzącego
+  socket.on('host_set_auto_advance', async ({ pin, enabled } = {}, callback) => {
+    const auth = await assertRoomOwner(socket, pin);
+    if (auth.error) {
+      callback?.({ error: auth.error });
+      return socket.emit('host_auth_error', { error: auth.error });
+    }
+
+    const newEnabled = enabled !== false;
+    await redis.hset(`room:${pin}:state`, 'auto_advance_enabled', newEnabled ? '1' : '0');
+
+    // Jeśli wyłączamy auto-advance i jesteśmy w LEADERBOARD, zatrzymaj timer
+    const { state } = auth;
+    if (!newEnabled && state.status === 'LEADERBOARD') {
+      clearRoomTimers(pin);
+      await redis.hset(`room:${pin}:state`, 'auto_next_paused', '0');
+      io.to(`host:${pin}`).emit('host_auto_next_status', {
+        isPaused: false,
+        autoNextIn: 0,
+        autoAdvanceEnabled: false,
+      });
+    } else if (newEnabled && state.status === 'LEADERBOARD') {
+      // Jeśli włączamy auto-advance, wznów odliczanie
+      clearRoomTimers(pin);
+      const now = Date.now();
+      const currentIdx = Number(state.current_q_index);
+      await redis.hmset(`room:${pin}:state`, {
+        auto_next_paused: '0',
+        phase_start_timestamp: now,
+        phase_duration_ms: AUTO_NEXT_SECONDS * 1000,
+      });
+      io.to(`host:${pin}`).emit('host_auto_next_status', {
+        isPaused: false,
+        autoNextIn: AUTO_NEXT_SECONDS,
+        autoAdvanceEnabled: true,
+      });
+      const autoNextTimer = setTimeout(() => {
+        startQuestionPreview(pin, currentIdx + 1);
+      }, AUTO_NEXT_SECONDS * 1000);
+      roomTimers.set(pin, { autoNextTimer });
+    }
+
+    // Powiadom hosta i ekran gry o zmianie trybu
+    io.to(`host:${pin}`).emit('host_auto_advance_changed', {
+      autoAdvanceEnabled: newEnabled,
+    });
+
+    callback?.({ success: true, autoAdvanceEnabled: newEnabled });
+  });
+
+  // 4b3. Ręczne przejście do wybranego pytania (poprzednie / następne)
+  socket.on('host_go_to_question', async ({ pin, qIndex } = {}, callback) => {
+    const auth = await assertRoomOwner(socket, pin);
+    if (auth.error) {
+      callback?.({ error: auth.error });
+      return socket.emit('host_auth_error', { error: auth.error });
+    }
+
+    const { state } = auth;
+    if (state.status === 'ABORTED' || state.status === 'PODIUM') {
+      return callback?.({ error: 'INVALID_STATE' });
+    }
+
+    const targetIdx = Number(qIndex);
+    if (!Number.isInteger(targetIdx) || targetIdx < 0) {
+      return callback?.({ error: 'INVALID_QUESTION_INDEX' });
+    }
+
+    const quiz = await getActiveRoomQuiz(pin, state.quiz_id);
+    if (!quiz) {
+      return callback?.({ error: 'QUIZ_NOT_FOUND' });
+    }
+
+    if (targetIdx >= quiz.questions.length) {
+      await finishQuiz(pin);
+    } else {
+      await startQuestionPreview(pin, targetIdx);
     }
     callback?.({ success: true });
   });
@@ -1730,7 +1962,8 @@ io.on('connection', (socket) => {
   // 5. Odbiór odpowiedzi od gracza w czasie rzeczywistym (wszystkie formy pytań)
   socket.on('submit_answer', async (payload = {}) => {
     try {
-      const { pin, qIndex, answerIndex, value, text } = payload;
+      const pin = String(payload.pin || '').trim();
+      const { qIndex, answerIndex, value, text } = payload;
       const now = Date.now();
       const state = await redis.hgetall(`room:${pin}:state`);
 
@@ -1767,15 +2000,19 @@ io.on('connection', (socket) => {
         storedValue = String(idx);
 
         if (scored && idx === Number(question.correctIndex)) {
-          const timeElapsed = Math.max(
-            0,
-            now - Number(state.question_start_timestamp)
-          );
-          const timeLimit = Math.max(1, Number(state.time_limit_ms));
-          earnedPoints = Math.max(
-            500,
-            Math.floor(1000 * (1 - timeElapsed / (timeLimit * 2)))
-          );
+          const timeLimit = Number(state.time_limit_ms);
+          if (timeLimit <= 0) {
+            earnedPoints = 1000;
+          } else {
+            const timeElapsed = Math.max(
+              0,
+              now - Number(state.question_start_timestamp)
+            );
+            earnedPoints = Math.max(
+              500,
+              Math.floor(1000 * (1 - timeElapsed / (timeLimit * 2)))
+            );
+          }
         }
       } else if (qType === 'slider') {
         const numVal = Number(value);
@@ -1792,20 +2029,24 @@ io.on('connection', (socket) => {
           const diff = Math.abs(numVal - correctVal);
           const isHit = tol === 0 ? diff === 0 : diff <= tol;
           if (isHit) {
-            const timeElapsed = Math.max(
-              0,
-              now - Number(state.question_start_timestamp)
-            );
-            const timeLimit = Math.max(1, Number(state.time_limit_ms));
             const accuracy = tol > 0 ? 1 - (diff / tol) * 0.5 : 1;
-            const timeFactor = Math.max(
-              0.5,
-              1 - timeElapsed / (timeLimit * 2)
-            );
-            earnedPoints = Math.max(
-              250,
-              Math.round(1000 * accuracy * timeFactor)
-            );
+            const timeLimit = Number(state.time_limit_ms);
+            if (timeLimit <= 0) {
+              earnedPoints = Math.max(250, Math.round(1000 * accuracy));
+            } else {
+              const timeElapsed = Math.max(
+                0,
+                now - Number(state.question_start_timestamp)
+              );
+              const timeFactor = Math.max(
+                0.5,
+                1 - timeElapsed / (timeLimit * 2)
+              );
+              earnedPoints = Math.max(
+                250,
+                Math.round(1000 * accuracy * timeFactor)
+              );
+            }
           }
         }
       } else if (qType === 'word_cloud') {

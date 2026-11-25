@@ -968,7 +968,7 @@ async function runTests(
           {
             type: 'poll',
             content: 'Ulubiony system?',
-            timeLimit: 15,
+            timeLimit: 0,
             answers: ['Linux', 'macOS', 'Windows'],
           },
           {
@@ -985,6 +985,7 @@ async function runTests(
         body: createPayload,
       });
       assert.equal(created.res.status, 201);
+      assert.equal(created.data.questions[3].timeLimit, 0);
       const quizAId = created.data.id;
 
       // IZOLACJA: Admin B nie widzi, nie może edytować ani usunąć quizu Admina A
@@ -1128,6 +1129,145 @@ async function runTests(
         assert.equal(pod2.rank, 2);
 
         await emitWithAck(hostA, 'host_leave_room', { pin });
+      } finally {
+        for (const s of sockets) s.disconnect();
+      }
+    });
+
+    // 7b. E2E Socket.IO: tryb ręcznego przełączania pytań + dołączanie w trakcie gry
+    await step('E2E Socket.IO: przełącznik trybu ręcznego pytań + dołączanie gracza w trakcie gry', async () => {
+      const quizRes = await adminAClient.request('/api/quizzes', {
+        method: 'POST',
+        body: {
+          title: 'CI E2E 2Q Manual & LateJoin',
+          mode: 'quiz',
+          questions: [
+            {
+              type: 'abcd',
+              content: 'Pytanie 1?',
+              timeLimit: 20,
+              answers: ['A1', 'B1'],
+              correctIndex: 0,
+            },
+            {
+              type: 'abcd',
+              content: 'Pytanie 2 (bez limitu)?',
+              timeLimit: 0,
+              answers: ['A2', 'B2'],
+              correctIndex: 1,
+            },
+          ],
+        },
+      });
+      assert.equal(quizRes.res.status, 201);
+      const twoQQuiz = quizRes.data;
+      assert.equal(twoQQuiz.questions[1].timeLimit, 0);
+
+      const sockets = [];
+      try {
+        const hostA = await connectSocket(baseUrl, adminAClient.cookie);
+        const screen = await connectSocket(baseUrl);
+        const player1 = await connectSocket(baseUrl);
+        const latePlayer = await connectSocket(baseUrl);
+        sockets.push(hostA, screen, player1, latePlayer);
+
+        const room = await emitWithAck(hostA, 'host_create_room', {
+          quizId: twoQQuiz.id,
+        });
+        const { pin } = room;
+
+        await emitWithAck(screen, 'screen_join_room', { pin });
+        const j1 = await emitWithAck(player1, 'player_join', {
+          pin,
+          nickname: 'EARLY',
+        });
+        assert.equal(j1.success, true);
+
+        // Wyłącz automatyczne przełączanie pytań jeszcze przed startem
+        const autoOffScreen = waitForEvent(screen, 'host_auto_advance_changed');
+        const setOffAck = await emitWithAck(hostA, 'host_set_auto_advance', {
+          pin,
+          enabled: false,
+        });
+        assert.equal(setOffAck.success, true);
+        assert.equal(setOffAck.autoAdvanceEnabled, false);
+        const changedEv = await autoOffScreen;
+        assert.equal(changedEv.autoAdvanceEnabled, false);
+
+        // Start -> preview -> question 0
+        const p1Countdown = waitForEvent(player1, 'player_countdown');
+        hostA.emit('host_start_game', { pin });
+        await p1Countdown;
+
+        const p1Preview = waitForEvent(player1, 'player_question_preview');
+        hostA.emit('host_force_next', { pin });
+        await p1Preview;
+
+        const p1Start = waitForEvent(player1, 'player_question_start');
+        hostA.emit('host_force_next', { pin });
+        await p1Start;
+
+        // Gracz latePlayer dołącza w trakcie trwania aktywnego pytania (QUESTION)
+        const lateJoinRes = await emitWithAck(latePlayer, 'player_join', {
+          pin,
+          nickname: 'LATE',
+        });
+        assert.equal(lateJoinRes.success, true);
+        assert.equal(lateJoinRes.error, undefined);
+        assert.equal(lateJoinRes.gameState?.status, 'QUESTION');
+        assert.equal(lateJoinRes.gameState?.payload?.qIndex, 0);
+
+        // Obaj gracze odpowiadają i kończą pytanie 0
+        const p1End = waitForEvent(player1, 'player_question_end');
+        const lateEnd = waitForEvent(latePlayer, 'player_question_end');
+        const hostLb = waitForEvent(hostA, 'host_question_end');
+        player1.emit('submit_answer', { pin, qIndex: 0, answerIndex: 0 });
+        latePlayer.emit('submit_answer', { pin, qIndex: 0, answerIndex: 1 });
+
+        const [lbData] = await Promise.all([hostLb, p1End, lateEnd]);
+        assert.equal(lbData.autoAdvanceEnabled, false);
+        assert.equal(lbData.autoNextIn, 0);
+        assert.equal(lbData.isPaused, false);
+
+        // Ręczne przejście do pytania 2 (qIndex: 1) i powrót do pytania 1 (qIndex: 0)
+        const p1Q2 = waitForEvent(player1, 'player_question_preview');
+        const lateQ2 = waitForEvent(latePlayer, 'player_question_preview');
+        const goQ2 = await emitWithAck(hostA, 'host_go_to_question', {
+          pin,
+          qIndex: 1,
+        });
+        assert.equal(goQ2.success, true);
+        const [q2Prev1, q2Prev2] = await Promise.all([p1Q2, lateQ2]);
+        assert.equal(q2Prev1.qIndex, 1);
+        assert.equal(q2Prev2.qIndex, 1);
+
+        const p1BackQ1 = waitForEvent(player1, 'player_question_preview');
+        const goQ1 = await emitWithAck(hostA, 'host_go_to_question', {
+          pin,
+          qIndex: 0,
+        });
+        assert.equal(goQ1.success, true);
+        const backEv = await p1BackQ1;
+        assert.equal(backEv.qIndex, 0);
+
+        // Przejdź do pytania 2 (bez limitu czasu) i sprawdź punktację
+        const p1Q2Again = waitForEvent(player1, 'player_question_preview');
+        await emitWithAck(hostA, 'host_go_to_question', { pin, qIndex: 1 });
+        await p1Q2Again;
+
+        const p1Q2Start = waitForEvent(player1, 'player_question_start');
+        hostA.emit('host_force_next', { pin });
+        const q2StartEv = await p1Q2Start;
+        assert.equal(q2StartEv.timeLimit, 0);
+
+        const p1Q2End = waitForEvent(player1, 'player_question_end');
+        player1.emit('submit_answer', { pin, qIndex: 1, answerIndex: 1 });
+        latePlayer.emit('submit_answer', { pin, qIndex: 1, answerIndex: 0 });
+        const q2EndEv = await p1Q2End;
+        assert.equal(q2EndEv.isCorrect, true);
+        assert.equal(q2EndEv.earnedPoints, 1000);
+
+        await emitWithAck(hostA, 'host_abort_game', { pin });
       } finally {
         for (const s of sockets) s.disconnect();
       }
