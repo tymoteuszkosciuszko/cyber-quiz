@@ -28,6 +28,7 @@ export function GameScreenView({ pin }) {
   const [answerCount, setAnswerCount] = useState({ count: 0, total: 0 });
   const [leaderboardData, setLeaderboardData] = useState(null);
   const [autoNextSeconds, setAutoNextSeconds] = useState(0);
+  const [autoAdvanceEnabled, setAutoAdvanceEnabled] = useState(true);
   const [barsAnimated, setBarsAnimated] = useState(false);
   const [podiumData, setPodiumData] = useState([]);
   const [allResults, setAllResults] = useState([]);
@@ -49,6 +50,7 @@ export function GameScreenView({ pin }) {
     setHasScoredQuestions(snap.hasScoredQuestions !== false);
     setPlayersList(snap.players || []);
     setStatus(snap.status);
+    setAutoAdvanceEnabled(snap.autoAdvanceEnabled !== false);
 
     if (snap.status === 'COUNTDOWN') {
       setCountdownSeconds(snap.countdownSeconds || 3);
@@ -136,11 +138,35 @@ export function GameScreenView({ pin }) {
       setStatus('LEADERBOARD');
       setLeaderboardData(data);
       setAutoNextSeconds(data.autoNextIn || 0);
+      if (data.autoAdvanceEnabled !== undefined) {
+        setAutoAdvanceEnabled(data.autoAdvanceEnabled);
+      }
     });
 
-    socket.on('host_auto_next_status', ({ isPaused, autoNextIn }) => {
-      setLeaderboardData((prev) => (prev ? { ...prev, isPaused } : prev));
-      setAutoNextSeconds(autoNextIn || 0);
+    socket.on(
+      'host_auto_next_status',
+      ({ isPaused, autoNextIn, autoAdvanceEnabled: aae }) => {
+        setLeaderboardData((prev) =>
+          prev
+            ? {
+                ...prev,
+                isPaused,
+                ...(aae !== undefined ? { autoAdvanceEnabled: aae } : {}),
+              }
+            : prev
+        );
+        setAutoNextSeconds(autoNextIn || 0);
+        if (aae !== undefined) {
+          setAutoAdvanceEnabled(aae);
+        }
+      }
+    );
+
+    socket.on('host_auto_advance_changed', ({ autoAdvanceEnabled: enabled }) => {
+      setAutoAdvanceEnabled(enabled);
+      setLeaderboardData((prev) =>
+        prev ? { ...prev, autoAdvanceEnabled: enabled } : prev
+      );
     });
 
     socket.on(
@@ -175,6 +201,7 @@ export function GameScreenView({ pin }) {
       socket.off('answer_count_update');
       socket.off('host_question_end');
       socket.off('host_auto_next_status');
+      socket.off('host_auto_advance_changed');
       socket.off('host_podium');
       socket.off('game_aborted');
     };
@@ -533,14 +560,10 @@ export function GameScreenView({ pin }) {
                         {previewTimeLeft.toFixed(1)} s
                       </Badge>
                     </div>
-                  ) : (
+                  ) : currentQuestion.timeLimit > 0 ? (
                     <div className="flex flex-1 min-w-[200px] max-w-md items-center gap-3">
                       <Progress
-                        value={
-                          currentQuestion.timeLimit > 0
-                            ? (timeLeft / currentQuestion.timeLimit) * 100
-                            : 0
-                        }
+                        value={(timeLeft / currentQuestion.timeLimit) * 100}
                         indicatorClassName={timeLeft <= 5 ? 'bg-danger' : 'bg-main'}
                       />
                       <Badge
@@ -550,11 +573,17 @@ export function GameScreenView({ pin }) {
                         {timeLeft.toFixed(1)} s
                       </Badge>
                     </div>
+                  ) : (
+                    <Badge variant="info" className="text-sm px-3 py-1">
+                      ∞ Bez limitu czasu
+                    </Badge>
                   )}
 
                   <Badge variant="neutral" className="text-sm px-3 py-1 tabular-nums">
                     {status === 'QUESTION_PREVIEW'
-                      ? `Limit: ${currentQuestion.timeLimit} s`
+                      ? currentQuestion.timeLimit > 0
+                        ? `Limit: ${currentQuestion.timeLimit} s`
+                        : 'Czas: Bez limitu'
                       : `Odpowiedzi: ${answerCount.count} / ${answerCount.total}`}
                   </Badge>
                 </div>
@@ -809,7 +838,12 @@ export function GameScreenView({ pin }) {
                   {lbScored && <Badge variant="neutral">Top 5</Badge>}
                 </div>
 
-                {leaderboardData.isPaused ? (
+                {!autoAdvanceEnabled ||
+                leaderboardData.autoAdvanceEnabled === false ? (
+                  <Badge variant="info" className="text-sm px-3 py-1">
+                    Przełączanie ręczne
+                  </Badge>
+                ) : leaderboardData.isPaused ? (
                   <Badge variant="warning" className="text-sm px-3 py-1">
                     Wstrzymane przez prowadzącego
                   </Badge>

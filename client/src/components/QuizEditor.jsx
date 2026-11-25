@@ -117,9 +117,15 @@ function getQuestionIssues(q, editorMode) {
     issues.push('Wpisz treść pytania lub dodaj zdjęcie.');
   }
 
+  const isNoLimit = q.timeLimit === 0 || q.timeLimit === null;
   const timeLimit = Number(q.timeLimit);
-  if (!Number.isFinite(timeLimit) || timeLimit < 5 || timeLimit > 120) {
-    issues.push('Czas odpowiedzi musi wynosić od 5 do 120 sekund.');
+  if (
+    !isNoLimit &&
+    (!Number.isFinite(timeLimit) || timeLimit < 5 || timeLimit > 120)
+  ) {
+    issues.push(
+      'Czas odpowiedzi musi wynosić od 5 do 120 sekund lub być ustawiony jako „Bez limitu”.'
+    );
   }
 
   if (qType === 'abcd' || qType === 'poll') {
@@ -776,8 +782,17 @@ export function QuizEditor({
                               !
                             </Badge>
                           )}
-                          <span className="text-[11px] font-heading font-bold tabular-nums text-foreground/75">
-                            {item.timeLimit || 20}s
+                          <span
+                            className="text-[11px] font-heading font-bold tabular-nums text-foreground/75"
+                            title={
+                              Number(item.timeLimit) === 0
+                                ? 'Bez limitu czasu'
+                                : undefined
+                            }
+                          >
+                            {Number(item.timeLimit) === 0
+                              ? '∞'
+                              : `${item.timeLimit ?? 20}s`}
                           </span>
                         </div>
                       </div>
@@ -1001,8 +1016,8 @@ export function QuizEditor({
                       </div>
                     </div>
 
-                    {/* Limit czasu z szybkimi presetami */}
-                    <div className="space-y-2 xl:min-w-[235px]">
+                    {/* Limit czasu z szybkimi presetami + opcją bez limitu */}
+                    <div className="space-y-2">
                       <Label
                         htmlFor={`time-${qIdx}`}
                         className="text-xs uppercase tracking-wider"
@@ -1010,21 +1025,27 @@ export function QuizEditor({
                         Limit czasu (sekundy)
                       </Label>
                       <div className="flex flex-wrap items-center gap-2">
-                        <Input
-                          id={`time-${qIdx}`}
-                          type="number"
-                          min="5"
-                          max="120"
-                          value={q.timeLimit}
-                          onChange={(e) =>
-                            updateEditorQuestion(
-                              qIdx,
-                              'timeLimit',
-                              Number(e.target.value)
-                            )
-                          }
-                          className="h-10 w-20 text-center font-heading text-base font-extrabold tabular-nums"
-                        />
+                        <div className="w-20 flex-shrink-0">
+                          <Input
+                            id={`time-${qIdx}`}
+                            type={Number(q.timeLimit) === 0 ? 'text' : 'number'}
+                            size={Number(q.timeLimit) === 0 ? 4 : undefined}
+                            min="5"
+                            max="120"
+                            disabled={Number(q.timeLimit) === 0}
+                            value={Number(q.timeLimit) === 0 ? '∞' : q.timeLimit}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              updateEditorQuestion(
+                                qIdx,
+                                'timeLimit',
+                                val === '' ? '' : Number(val)
+                              );
+                            }}
+                            aria-label="Limit czasu w sekundach"
+                            className="h-10 min-w-0 px-2 text-center font-heading text-base font-extrabold tabular-nums"
+                          />
+                        </div>
                         <div className="flex flex-wrap gap-1">
                           {TIME_PRESETS.map((sec) => {
                             const active = Number(q.timeLimit) === sec;
@@ -1046,6 +1067,24 @@ export function QuizEditor({
                               </button>
                             );
                           })}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateEditorQuestion(
+                                qIdx,
+                                'timeLimit',
+                                Number(q.timeLimit) === 0 ? 20 : 0
+                              )
+                            }
+                            className={cn(
+                              'h-8 rounded-base border-2 border-border px-2.5 font-heading text-xs font-bold transition-colors cursor-pointer whitespace-nowrap',
+                              Number(q.timeLimit) === 0
+                                ? 'bg-main'
+                                : 'bg-secondary-background hover:bg-main/30'
+                            )}
+                          >
+                            ∞ Bez limitu
+                          </button>
                         </div>
                       </div>
                     </div>

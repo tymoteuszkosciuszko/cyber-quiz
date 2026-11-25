@@ -208,7 +208,10 @@ export function convertQuestionType(question, targetType, quizMode = 'quiz') {
     _uid: question._uid || fresh._uid,
     content: question.content || '',
     image: question.image || null,
-    timeLimit: question.timeLimit || 20,
+    timeLimit:
+      question.timeLimit === 0 || question.timeLimit === null
+        ? 0
+        : question.timeLimit || 20,
   };
 
   // Zachowaj odpowiedzi przy przełączaniu między ABCD a Ankietą

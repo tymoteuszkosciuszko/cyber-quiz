@@ -92,6 +92,7 @@ function MainApp() {
     questionSummaries: [],
   });
   const [countdownSeconds, setCountdownSeconds] = useState(0);
+  const [autoAdvanceEnabled, setAutoAdvanceEnabled] = useState(true);
   const screenWindowRef = useRef(null);
 
   // ─── STAN GRACZA (SMARTFON) ───
@@ -270,11 +271,21 @@ function MainApp() {
       setHostStatus('LEADERBOARD');
       setLeaderboardData(data);
       setAutoNextSeconds(data.autoNextIn || 0);
+      if (data.autoAdvanceEnabled !== undefined) {
+        setAutoAdvanceEnabled(data.autoAdvanceEnabled);
+      }
     });
 
-    socket.on('host_auto_next_status', ({ isPaused, autoNextIn }) => {
+    socket.on('host_auto_next_status', ({ isPaused, autoNextIn, autoAdvanceEnabled: aae }) => {
       setLeaderboardData((prev) => (prev ? { ...prev, isPaused } : prev));
       setAutoNextSeconds(autoNextIn || 0);
+      if (aae !== undefined) {
+        setAutoAdvanceEnabled(aae);
+      }
+    });
+
+    socket.on('host_auto_advance_changed', ({ autoAdvanceEnabled: enabled }) => {
+      setAutoAdvanceEnabled(enabled);
     });
 
     socket.on(
@@ -304,7 +315,9 @@ function MainApp() {
 
     socket.on('player_question_preview', (data) => {
       setPlayerPreview(data);
-      setPlayerPreviewTimeLeft(data.previewDuration || 5);
+      setPlayerPreviewTimeLeft(
+        data.previewRemaining ?? data.previewDuration ?? 5
+      );
       setPlayerCountdown(0);
       setPlayerState('PREVIEW');
     });
@@ -351,6 +364,7 @@ function MainApp() {
       socket.off('answer_count_update');
       socket.off('host_question_end');
       socket.off('host_auto_next_status');
+      socket.off('host_auto_advance_changed');
       socket.off('host_podium');
       socket.off('player_countdown');
       socket.off('player_question_preview');
@@ -505,6 +519,7 @@ function MainApp() {
       setAllResults([]);
       setConnectedScreens(0);
       setHostStatus('LOBBY');
+      setAutoAdvanceEnabled(true);
       setMode('HOST');
       toast.success(
         'Uruchomiono sesję',
@@ -529,6 +544,7 @@ function MainApp() {
     setConnectedScreens(0);
     setPopupBlocked(false);
     setHostStatus('LOBBY');
+    setAutoAdvanceEnabled(true);
     setMode('MENU');
   };
 
@@ -589,7 +605,10 @@ function MainApp() {
             type,
             content: q.content || '',
             image: q.image || null,
-            timeLimit: q.timeLimit || 20,
+            timeLimit:
+              q.timeLimit === 0 || q.timeLimit === null
+                ? 0
+                : q.timeLimit || 20,
             scored: isQuestionScored(q, quizMode),
           };
           if (type === 'abcd' || type === 'true_false' || type === 'poll') {
@@ -640,7 +659,10 @@ function MainApp() {
         const clean = {
           type,
           content: q.content || '',
-          timeLimit: q.timeLimit,
+          timeLimit:
+            q.timeLimit === 0 || q.timeLimit === null
+              ? 0
+              : Number(q.timeLimit),
           scored,
         };
         if (q.image) {
@@ -874,9 +896,32 @@ function MainApp() {
     e.preventDefault();
     setJoinError('');
     socket.emit('player_join', { pin: playerPin, nickname }, (res) => {
-      if (res.error) setJoinError(res.error);
-      else {
-        setNickname(res.nickname);
+      if (res.error) {
+        setJoinError(res.error);
+        return;
+      }
+      if (res.pin) setPlayerPin(res.pin);
+      setNickname(res.nickname);
+      const gs = res.gameState;
+      if (gs?.status === 'COUNTDOWN' && gs.payload) {
+        setPlayerCountdown(gs.payload.seconds || 3);
+        setPlayerState('COUNTDOWN');
+      } else if (gs?.status === 'QUESTION_PREVIEW' && gs.payload) {
+        setPlayerPreview(gs.payload);
+        setPlayerPreviewTimeLeft(
+          gs.payload.previewRemaining ?? gs.payload.previewDuration ?? 5
+        );
+        setPlayerCountdown(0);
+        setPlayerState('PREVIEW');
+      } else if (gs?.status === 'QUESTION' && gs.payload) {
+        setPadQuestion(gs.payload);
+        setPlayerCountdown(0);
+        setPlayerPreviewTimeLeft(0);
+        setPlayerState('PAD');
+      } else if (gs?.status === 'LEADERBOARD' && gs.payload) {
+        setPlayerResult(gs.payload);
+        setPlayerState('RESULT');
+      } else {
         setPlayerState('WAITING');
       }
     });
@@ -1109,6 +1154,7 @@ function MainApp() {
             answerCount={answerCount}
             leaderboardData={leaderboardData}
             autoNextSeconds={autoNextSeconds}
+            autoAdvanceEnabled={autoAdvanceEnabled}
             allResults={allResults}
             sessionEndMeta={sessionEndMeta}
             onOpenGameScreen={() => openGameScreenWindow(roomPin)}
@@ -1116,6 +1162,12 @@ function MainApp() {
             onForceNext={() => socket.emit('host_force_next', { pin: roomPin })}
             onTogglePause={() =>
               socket.emit('host_toggle_pause', { pin: roomPin })
+            }
+            onSetAutoAdvance={(enabled) =>
+              socket.emit('host_set_auto_advance', { pin: roomPin, enabled })
+            }
+            onGoToQuestion={(qIndex) =>
+              socket.emit('host_go_to_question', { pin: roomPin, qIndex })
             }
             onAbortGame={handleAbortGame}
             onFinishSession={handleFinishSession}
